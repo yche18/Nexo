@@ -217,7 +217,7 @@
         <div class="heading-copy">
           <span class="kicker">Knowledge operations</span>
           <h1>知识库</h1>
-          <p>搜索、补充和维护客服 Agent 使用的知识片段。</p>
+          <p>搜索、补充和维护IT 支持 Agent 使用的知识片段。</p>
         </div>
         <div class="count-display"><strong>{{ knowledgeCount }}</strong><span>chunks</span></div>
       </div>
@@ -241,7 +241,7 @@
               </div>
             </article>
           </div>
-          <div v-else class="workspace-empty">输入客户问题开始搜索。</div>
+          <div v-else class="workspace-empty">输入IT 问题开始搜索。</div>
         </section>
 
         <section class="workspace-card import-workspace">
