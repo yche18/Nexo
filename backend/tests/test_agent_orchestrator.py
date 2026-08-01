@@ -42,7 +42,7 @@ def make_request(**kwargs):
         "intent_group": "technical",
         "urgency": UrgencyLevel.HIGH,
         "intent_confidence": 0.92,
-        "entities": {"error_code": ["401"], "amount": ["99 元"]},
+        "entities": {"error_code": ["401"], "requested_access": ["只读权限"]},
     }
     values.update(kwargs)
     return Request(**values)
@@ -286,3 +286,30 @@ def test_monitor_penalty_falls_back_to_general_agent():
     assert decision.primary_agent is AgentType.GENERAL
     assert decision.supporting_agents == []
     assert "monitor_fallback=[technical]" in decision.reason
+
+
+def test_handoff_displays_known_it_fields_without_empty_json():
+    client = FakeClient()
+    agent = EscalationAgent(client, "test-model")
+    response = asyncio.run(agent.handle(make_request(entities={
+        "target_system": ["VPN"], "issue_description": ["登录失败"],
+        "date": [], "error_code": ["401"], "requested_access": [], "purpose": [],
+    })))
+    assert "目标系统：VPN" in response.content
+    assert "问题现象：登录失败" in response.content
+    assert "错误码：401" in response.content
+    assert "发生时间：" not in response.content
+    assert "[]" not in response.content
+    assert "尚未创建工单或通知 IT 人员" in response.content
+    assert client.calls == []
+
+
+def test_handoff_with_no_extracted_information_asks_for_details():
+    client = FakeClient()
+    response = asyncio.run(EscalationAgent(client, "test-model").handle(
+        make_request(entities={"target_system": [], "error_code": []})
+    ))
+    assert "暂未提取到具体信息" in response.content
+    assert "[]" not in response.content
+    assert response.escalate is True
+    assert client.calls == []

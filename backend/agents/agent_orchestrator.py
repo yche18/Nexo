@@ -402,7 +402,10 @@ class BaseAgent:
             f"输出要求：{'；'.join(self.profile.output_contract)}\n"
             f"升级条件：{'；'.join(self.profile.handoff_conditions) or '无，按通用客服规则处理'}\n"
             f"允许的数据/工具范围：{'、'.join(self.profile.tool_scope) or '仅使用当前请求上下文'}\n"
-            "不要声称执行了未提供的查询、修改或退款操作；缺少证据时明确说明需要核验。"
+            "不要声称执行了未提供的查询、修改或授权操作；缺少证据时明确说明需要核验。\n"
+            "[IT 支持实体] target_system=目标系统，issue_description=问题现象，date=发生时间，"
+            "error_code=错误码，requested_access=申请权限，purpose=申请用途。"
+            "实体仅由本轮消息的规则匹配得到，空值表示未提取到，不代表用户没有该信息；结合原文和已有上下文理解。"
         )
         base_prompt = f"{self.system_prompt}{profile_prompt}"
         if self._skill_manager is None:
@@ -559,7 +562,20 @@ class EscalationAgent(BaseAgent):
         self.stats.total += 1
         intent = req.intent.value if req.intent else "unknown"
         urgency = req.urgency.name if req.urgency else "UNKNOWN"
-        entities = json.dumps(req.entities or {}, ensure_ascii=False)
+        entity_labels = {
+            "target_system": "目标系统",
+            "issue_description": "问题现象",
+            "date": "发生时间",
+            "error_code": "错误码",
+            "requested_access": "申请权限",
+            "purpose": "申请用途",
+        }
+        details = [
+            f"{label}：{'、'.join(req.entities[key])}"
+            for key, label in entity_labels.items()
+            if (req.entities or {}).get(key)
+        ]
+        entities = "；".join(details) if details else "暂未提取到具体信息，请补充涉及的系统、问题现象或申请需求。"
         content = (
             "这个问题需要 IT 人工升级处理，请携带以下信息联系 IT 支持。\n\n"
             f"升级原因：意图={intent}，紧急度={urgency}\n"

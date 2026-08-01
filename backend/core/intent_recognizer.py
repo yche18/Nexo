@@ -362,13 +362,27 @@ class IntentRecognizer:
         """用规则提取高价值实体，避免每次识别都额外调用 LLM。"""
         message = self._clean_text(message)
         return {
-            "order_id": self._unique(re.findall(r"(?:订单号?|order(?:_id)?|#)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
-            "product": [],
+            "target_system": self._unique(
+                re.findall(r"(?:目标系统|涉及系统|系统名称|应用名称)\s*[:：]\s*([^，。；;！？!?\n]+)", message)
+                + [name for name in ("VPN", "企业邮箱", "项目管理系统", "项目系统", "OA", "GitLab", "Jira", "飞书", "钉钉")
+                   if re.search(r"(?<![A-Za-z0-9])" + re.escape(name) + r"(?![A-Za-z0-9])", message, re.I)]
+            ),
+            "issue_description": self._unique(
+                re.findall(r"(?:问题现象|故障现象)\s*[:：]\s*([^，。；;！？!?\n]+)", message)
+                + re.findall(r"无法登录|登录失败|连接超时|连接失败|无法连接|连不上|收不到验证码|验证码收不到|崩溃|闪退", message)
+            ),
             "date": self._unique(re.findall(r"(今天|明天|昨天|本周|这周|下周|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", message)),
-            "amount": self._unique(re.findall(r"((?:¥|￥)\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:元|块|rmb|cny|usd|美元))", message, re.I)),
             "error_code": self._unique(
                 re.findall(r"(?:error(?:_code)?|错误码|状态码|http)\s*[:：#]?\s*([45]\d{2})\b", message, re.I)
                 + re.findall(r"\b([45]\d{2})\b", message)
+            ),
+            "requested_access": self._unique(
+                re.findall(r"(?:申请权限|所需权限|权限类型)\s*[:：]\s*([^，。；;！？!?\n]+)", message)
+                + re.findall(r"只读(?:访问)?权限|读写权限|管理员权限|仓库访问权限|项目访问权限|VPN\s*权限", message, re.I)
+            ),
+            "purpose": self._unique(
+                re.findall(r"(?:申请用途|用途)\s*[:：]\s*([^，。；;！？!?\n]+)", message)
+                + re.findall(r"(?:用于|用来)\s*([^，。；;！？!?\n]+)", message)
             ),
         }
 
