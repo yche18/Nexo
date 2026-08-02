@@ -511,7 +511,7 @@ class AccessAgent(BaseAgent):
     )
     system_prompt = (
         "你是 Nexo 的账号与权限支持专家，负责企业账号咨询与权限申请指引。"
-        "按知识库说明流程；缺少申请信息时使用 check_access_fields 检查，只传用户明确提供的信息。"
+        "按知识库说明流程；使用 check_access_fields 检查已提取的目标系统与用途，按缺失字段补问。"
         "你未接入身份、审批或权限系统，不得声称已查询权限、提交申请、完成审批或开通账号。"
         "登录和网络故障由技术支持排查；实际操作交由 IT 人员处理，不索要密码和验证码。"
     )
@@ -519,8 +519,14 @@ class AccessAgent(BaseAgent):
     def _build_role_packet(self, req: Request) -> str:
         packet = json.loads(super()._build_role_packet(req))
         packet["application_fields"] = {
-            "required_fields": ["target_system", "purpose"],
-            "source_hint": "从用户消息和已有对话中确认目标系统与用途，未知信息应补问",
+            "target_system": req.entities.get("target_system", []),
+            "purpose": req.entities.get("purpose", []),
+            "missing_fields": [
+                field for field, values in (
+                    ("目标系统", req.entities.get("target_system", [])),
+                    ("申请用途", req.entities.get("purpose", [])),
+                ) if not values
+            ],
             "risk_boundary": "只提供指引，不查询身份、不执行授权、不承诺审批结果",
         }
         return json.dumps(packet, ensure_ascii=False)

@@ -133,8 +133,8 @@ def build_diagnostic_plan(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
 def check_access_fields(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """检查申请信息是否齐全，不查询身份或执行授权。"""
     fields = {
-        "target_system": bool(str(args.get("target_system", "")).strip()),
-        "purpose": bool(str(args.get("purpose", "")).strip()),
+        "target_system": bool(req.entities.get("target_system")),
+        "purpose": bool(req.entities.get("purpose")),
     }
     return {
         "fields": fields,
@@ -246,11 +246,8 @@ def access_tools() -> Dict[str, AgentToolSpec]:
     return {
         "check_access_fields": make_tool(
             "check_access_fields",
-            "检查权限申请的目标系统和用途是否齐全；只填写用户明确提供的信息，不查询或修改权限。",
-            {
-                "target_system": {"type": "string", "description": "需要访问的系统名称，未知则省略"},
-                "purpose": {"type": "string", "description": "用户说明的申请用途，未知则省略"},
-            },
+            "检查当前请求实体中的目标系统和申请用途是否齐全；无需传参，不查询或修改权限。",
+            {},
             check_access_fields,
         ),
     }

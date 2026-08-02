@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from agents.agent_orchestrator import (
     AgentProfile,
@@ -313,3 +314,16 @@ def test_handoff_with_no_extracted_information_asks_for_details():
     assert "[]" not in response.content
     assert response.escalate is True
     assert client.calls == []
+
+
+def test_access_packet_lists_missing_fields_from_entities():
+    agent = AccessAgent(FakeClient(), "test-model")
+    for entities, expected in (
+        ({}, ["目标系统", "申请用途"]),
+        ({"target_system": ["VPN"]}, ["申请用途"]),
+        ({"target_system": ["VPN"], "purpose": ["远程办公"]}, []),
+    ):
+        packet = json.loads(agent._build_role_packet(make_request(entities=entities)))
+        assert packet["application_fields"]["missing_fields"] == expected
+        assert packet["application_fields"]["target_system"] == entities.get("target_system", [])
+        assert packet["application_fields"]["purpose"] == entities.get("purpose", [])
