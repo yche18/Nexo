@@ -140,7 +140,7 @@ def check_access_fields(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
         "fields": fields,
         "missing_fields": [name for name, present in fields.items() if not present],
         "can_grant_access": False,
-        "reason": "当前工具只检查申请信息；权限开通需要 IT 人员按审批流程处理",
+        "reason": "当前工具只检查申请信息；实际开通需转人工（IT 支持）按审批流程处理",
     }
 
 

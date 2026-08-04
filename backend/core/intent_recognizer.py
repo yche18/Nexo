@@ -286,8 +286,8 @@ class IntentRecognizer:
         """策略 3：关键词模式匹配（同步，零延迟兜底）。"""
         msg = message.lower()
         specific_patterns = {
-            IntentCategory.PERMISSION_REQUEST: ["申请权限", "申请项目", "开通", "访问权限", "权限申请", "只读权限"],
             IntentCategory.HUMAN_HANDOFF: ["转人工", "人工客服", "找人工", "转 it", "找 it"],
+            IntentCategory.PERMISSION_REQUEST: ["申请权限", "申请项目", "开通", "访问权限", "权限申请", "只读权限"],
             IntentCategory.ACCOUNT_SECURITY: ["被盗", "异常登录", "重置密码", "两步验证", "安全"],
             IntentCategory.TECHNICAL_LOGIN: ["无法登录", "登录失败", "401", "验证码"],
             IntentCategory.TECHNICAL_CRASH: ["崩溃", "闪退", "500", "报错", "crash"],

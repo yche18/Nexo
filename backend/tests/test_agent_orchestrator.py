@@ -327,3 +327,9 @@ def test_access_packet_lists_missing_fields_from_entities():
         assert packet["application_fields"]["missing_fields"] == expected
         assert packet["application_fields"]["target_system"] == entities.get("target_system", [])
         assert packet["application_fields"]["purpose"] == entities.get("purpose", [])
+
+
+def test_it_handoff_wording_matches_existing_escalation_detection():
+    agent = GeneralAgent(FakeClient(), "test-model")
+    assert agent._needs_escalation("请转人工（IT 支持）确认。") is True
+    assert agent._needs_escalation("请先检查网络连接。") is False

@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
         query = params.get("query", "")
         return [{
             "title": "知识库降级结果",
-            "content": f"知识库暂时不可用，未能完成对“{query}”的语义检索。请稍后重试，或联系 IT 人员确认。",
+            "content": f"知识库暂时不可用，未能完成对“{query}”的语义检索。请稍后重试，或转人工（IT 支持）确认。",
             "score": 0.0,
             "fallback": True,
             "error": error,
