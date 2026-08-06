@@ -1013,7 +1013,7 @@ class AgentOrchestrator:
             scores[AgentType.ACCESS] += 0.75
 
         technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "验证码", "连不上", "连接失败"]
-        access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "账号", "账户", "account", "permission", "只读权限"]
+        access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "permission", "只读权限"]
         general_kws = ["安装", "办公软件", "打印机", "操作手册", "咨询", "帮助"]
 
         technical_hits = sum(1 for kw in technical_kws if kw in msg)
@@ -1059,7 +1059,7 @@ class AgentOrchestrator:
         targets: List[AgentType] = []
 
         technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "连不上", "连接失败"]
-        access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "账号", "账户", "account", "permission", "只读权限"]
+        access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "permission", "只读权限"]
 
         if req.intent in (
             IntentCategory.TECHNICAL,

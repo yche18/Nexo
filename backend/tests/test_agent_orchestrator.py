@@ -333,3 +333,19 @@ def test_it_handoff_wording_matches_existing_escalation_detection():
     agent = GeneralAgent(FakeClient(), "test-model")
     assert agent._needs_escalation("请转人工（IT 支持）确认。") is True
     assert agent._needs_escalation("请先检查网络连接。") is False
+
+
+def test_account_words_do_not_trigger_extra_access_collaboration():
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._pool = {kind: [object()] for kind in AgentType}
+    for message in ("账号登录失败", "账户登录失败", "account 登录失败", "账号账户 account 登录失败"):
+        req = make_request(message=message, entities={})
+        decision = orchestrator._route_decision(req)
+        assert decision.primary_agent is AgentType.TECHNICAL
+        assert decision.supporting_agents == []
+        assert orchestrator._domain_scores(req)[AgentType.ACCESS] == 0
+    for intent in (IntentCategory.ACCOUNT, IntentCategory.ACCOUNT_SECURITY):
+        decision = orchestrator._route_decision(make_request(
+            message="账号信息", intent=intent, entities={},
+        ))
+        assert decision.primary_agent is AgentType.ACCESS
