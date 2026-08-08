@@ -1027,6 +1027,10 @@ class AgentOrchestrator:
         entities = req.entities or {}
         if entities.get("error_code"):
             scores[AgentType.TECHNICAL] += 0.2
+        if entities.get("requested_access"):
+            scores[AgentType.ACCESS] += 0.15
+        if entities.get("target_system"):
+            scores[AgentType.GENERAL] += 0.1
 
         return {agent_type: round(score, 3) for agent_type, score in scores.items()}
 

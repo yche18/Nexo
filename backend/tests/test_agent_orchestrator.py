@@ -289,6 +289,71 @@ def test_monitor_penalty_falls_back_to_general_agent():
     assert "monitor_fallback=[technical]" in decision.reason
 
 
+def test_descriptive_entities_do_not_add_domain_scores_or_change_routing():
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._pool = {kind: [object()] for kind in AgentType}
+    for intent, message in (
+        (IntentCategory.TECHNICAL_LOGIN, "VPN 登录报错 401"),
+        (IntentCategory.PERMISSION_REQUEST, "申请项目权限"),
+        (IntentCategory.GREETING, "你好"),
+        (IntentCategory.HUMAN_HANDOFF, "转人工"),
+    ):
+        scored = {"error_code": ["401"], "requested_access": ["只读权限"], "target_system": ["VPN"]}
+        original = make_request(intent=intent, message=message, entities=scored)
+        adapted = make_request(intent=intent, message=message, entities={
+            **scored, "issue_description": ["登录失败"], "date": ["今天"], "purpose": ["查看需求"],
+        })
+        assert orchestrator._domain_scores(original) == orchestrator._domain_scores(adapted)
+        assert orchestrator._route_decision(original) == orchestrator._route_decision(adapted)
+
+
+def test_three_entity_bonuses_match_original_weights_and_only_apply_once():
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    baseline = orchestrator._domain_scores(make_request(entities={}))
+    for field, target, weight in (
+        ("error_code", AgentType.TECHNICAL, 0.2),
+        ("requested_access", AgentType.ACCESS, 0.15),
+        ("target_system", AgentType.GENERAL, 0.1),
+    ):
+        assert orchestrator._domain_scores(make_request(entities={field: []})) == baseline
+        for values in (["value"], ["first", "second"]):
+            actual = orchestrator._domain_scores(make_request(entities={field: values}))
+            expected = dict(baseline)
+            expected[target] = round(expected[target] + weight, 3)
+            assert actual == expected
+    all_present = orchestrator._domain_scores(make_request(entities={
+        "error_code": ["401"], "requested_access": ["只读权限"], "target_system": ["VPN"],
+    }))
+    assert all_present == {
+        AgentType.GENERAL: round(baseline[AgentType.GENERAL] + 0.1, 3),
+        AgentType.TECHNICAL: round(baseline[AgentType.TECHNICAL] + 0.2, 3),
+        AgentType.ACCESS: round(baseline[AgentType.ACCESS] + 0.15, 3),
+    }
+
+
+def test_routes_with_extracted_it_entities_and_fixed_intents():
+    from core.intent_recognizer import IntentRecognizer
+
+    recognizer = IntentRecognizer.__new__(IntentRecognizer)
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._pool = {kind: [object()] for kind in AgentType}
+    cases = (
+        ("VPN 登录失败，错误码 401", IntentCategory.TECHNICAL_LOGIN, UrgencyLevel.LOW, AgentType.TECHNICAL, []),
+        ("申请项目系统只读权限，用于查看需求", IntentCategory.PERMISSION_REQUEST, UrgencyLevel.LOW, AgentType.ACCESS, []),
+        ("VPN 登录失败，同时申请只读权限", IntentCategory.TECHNICAL_LOGIN, UrgencyLevel.LOW, AgentType.TECHNICAL, [AgentType.ACCESS]),
+        ("VPN 怎么使用", IntentCategory.QUERY, UrgencyLevel.LOW, AgentType.GENERAL, []),
+        ("账号登录失败", IntentCategory.TECHNICAL_LOGIN, UrgencyLevel.LOW, AgentType.TECHNICAL, []),
+        ("VPN 登录失败，请转人工", IntentCategory.HUMAN_HANDOFF, UrgencyLevel.LOW, AgentType.ESCALATION, []),
+        ("紧急 VPN 登录失败", IntentCategory.TECHNICAL_LOGIN, UrgencyLevel.CRITICAL, AgentType.ESCALATION, []),
+    )
+    for message, intent, urgency, primary, supporting in cases:
+        req = make_request(message=message, intent=intent, urgency=urgency,
+                           entities=recognizer._extract_entities(message))
+        decision = orchestrator._route_decision(req)
+        assert decision.primary_agent is primary, message
+        assert decision.supporting_agents == supporting, message
+
+
 def test_handoff_displays_known_it_fields_without_empty_json():
     client = FakeClient()
     agent = EscalationAgent(client, "test-model")
@@ -316,6 +381,22 @@ def test_handoff_with_no_extracted_information_asks_for_details():
     assert client.calls == []
 
 
+def test_account_words_do_not_trigger_extra_access_collaboration():
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._pool = {kind: [object()] for kind in AgentType}
+    for message in ("账号登录失败", "账户登录失败", "account 登录失败", "账号账户 account 登录失败"):
+        req = make_request(message=message, entities={})
+        decision = orchestrator._route_decision(req)
+        assert decision.primary_agent is AgentType.TECHNICAL
+        assert decision.supporting_agents == []
+        assert orchestrator._domain_scores(req)[AgentType.ACCESS] == 0
+    for intent in (IntentCategory.ACCOUNT, IntentCategory.ACCOUNT_SECURITY):
+        decision = orchestrator._route_decision(make_request(
+            message="账号信息", intent=intent, entities={},
+        ))
+        assert decision.primary_agent is AgentType.ACCESS
+
+
 def test_access_packet_lists_missing_fields_from_entities():
     agent = AccessAgent(FakeClient(), "test-model")
     for entities, expected in (
@@ -333,19 +414,3 @@ def test_it_handoff_wording_matches_existing_escalation_detection():
     agent = GeneralAgent(FakeClient(), "test-model")
     assert agent._needs_escalation("请转人工（IT 支持）确认。") is True
     assert agent._needs_escalation("请先检查网络连接。") is False
-
-
-def test_account_words_do_not_trigger_extra_access_collaboration():
-    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
-    orchestrator._pool = {kind: [object()] for kind in AgentType}
-    for message in ("账号登录失败", "账户登录失败", "account 登录失败", "账号账户 account 登录失败"):
-        req = make_request(message=message, entities={})
-        decision = orchestrator._route_decision(req)
-        assert decision.primary_agent is AgentType.TECHNICAL
-        assert decision.supporting_agents == []
-        assert orchestrator._domain_scores(req)[AgentType.ACCESS] == 0
-    for intent in (IntentCategory.ACCOUNT, IntentCategory.ACCOUNT_SECURITY):
-        decision = orchestrator._route_decision(make_request(
-            message="账号信息", intent=intent, entities={},
-        ))
-        assert decision.primary_agent is AgentType.ACCESS
