@@ -2,24 +2,54 @@ name: nexo
 services:
   redis:
     image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-16379}:6379"
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-nexo-local-password}
     volumes:
       - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-nexo-local-password}", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   chromadb:
     image: chromadb/chroma:0.5.23
+    ports:
+      - "${CHROMA_EXTERNAL_PORT:-18001}:8000"
     environment:
       IS_PERSISTENT: "TRUE"
       PERSIST_DIRECTORY: /chroma/chroma
       ANONYMIZED_TELEMETRY: "FALSE"
     volumes:
       - chromadb-data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "${PROMETHEUS_WEB_PORT:-19090}:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   backend:
@@ -28,10 +58,9 @@ services:
       target: production
     ports:
       - "${BACKEND_PORT:-18000}:8000"
+    env_file:
+      - .env
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}
       REDIS_URL: redis://:${REDIS_PASSWORD:-nexo-local-password}@redis:6379/0
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
@@ -39,13 +68,39 @@ services:
       EVAL_BASELINE_PATH: /app/data/eval/baseline.json
       NEXO_SKILLS_DIR: /app/skills
     volumes:
-      - backend-data:/app/data
-      - ./backend/skills:/app/skills:ro
+      - ./data/chroma:/app/data/chroma
+      - ./data/eval:/app/data/eval
+      - ./backend/skills:/app/skills
+      - ./logs:/app/logs
     depends_on:
       redis:
         condition: service_healthy
       chromadb:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "${NGINX_PORT:-18081}:80"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   frontend:
@@ -55,11 +110,19 @@ services:
     environment:
       PYTHON_API_URL: /api/python
     depends_on:
-      backend:
+      nginx:
         condition: service_healthy
     restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16
 
 volumes:
   redis-data:
   chromadb-data:
-  backend-data:
+  prometheus-data:
+  nginx-logs:
