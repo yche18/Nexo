@@ -58,14 +58,31 @@ ANTHROPIC_MODEL=your-model-name
 docker compose up -d --build
 ```
 
-| 服务 | 地址 |
+### 访问入口
+
+| 入口 | 地址 |
 | --- | --- |
 | 工作台 | http://localhost:18080 |
 | 后端 API | http://localhost:18000 |
 | API 文档 | http://localhost:18000/docs |
 | 健康检查 | http://localhost:18000/health |
 
-端口可通过 `.env` 中的 `FRONTEND_PORT` 和 `BACKEND_PORT` 调整。会话与知识库数据保存在 Docker 数据卷中。
+### 主要端口
+
+| 服务 | 端口 |
+| --- | ---: |
+| 前端工作台 | 18080 |
+| 后端 API | 18000 |
+| Nginx | 18081 |
+| Prometheus | 19090 |
+| ChromaDB | 18001 |
+| Redis | 16379 |
+
+宿主机端口可通过 `.env.example` 列出的端口变量调整；与 `API_PORT`、`CHROMA_PORT` 等容器内部端口区分。
+
+后端通过 `env_file` 接收 `.env` 中的配置；Compose 中声明的容器地址和路径会覆盖同名配置。修改配置后运行 `docker compose up -d` 重建受影响的容器。
+
+Redis、ChromaDB 和 Prometheus 使用 Nexo 独立数据卷；本地降级数据、评测基线和应用日志分别位于 `data/chroma`、`data/eval`、`logs`。前端请求经过独立 Nginx，读取超时为 600 秒。Compose 使用独立网段 `172.19.0.0/16`，Nginx 的指标访问限制与该网段对应。
 
 ```bash
 # 查看服务状态
@@ -102,6 +119,7 @@ backend/
   skills/       IT 业务规范
   tests/        后端测试
 frontend/       Vue 工作台
+config/         Prometheus 和 Nginx 配置
 compose.yaml    部署配置
 ```
 
@@ -129,3 +147,13 @@ npm run build
 ```
 
 Windows 本地安装部分依赖可能需要 C++ 构建工具，完整服务可通过 Docker Compose 运行。离线测试不需要模型密钥；实际对话和模型评测需要配置可用的模型服务。
+
+## 部署脚本
+
+在项目根目录使用 Bash 运行：
+
+- `bash build-image.sh help`：后端镜像构建、标签与推送命令。
+- `bash run-image.sh help`：单独运行后端镜像及查看容器状态。
+- `bash docker-deploy.sh help`：Compose 部署、状态、日志、备份和恢复命令。
+
+完整前后端服务仍使用 `docker compose up -d --build`。脚本生成的 `backups/` 包含本地配置，不纳入 Git。
