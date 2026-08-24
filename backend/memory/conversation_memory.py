@@ -25,7 +25,7 @@ import chromadb
 import redis.asyncio as redis
 from anthropic import AsyncAnthropic
 
-from core.llm_utils import extract_text_content
+from core.llm_utils import extract_text_content, thinking_request_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +188,7 @@ class MemoryManager:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=512, temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
+                **thinking_request_kwargs(),
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
@@ -275,6 +276,7 @@ class MemoryManager:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=256, temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
+                **thinking_request_kwargs(),
             )
             summary = self._safe_text(extract_text_content(resp.content)).strip()
         except Exception:
@@ -468,6 +470,7 @@ class MemoryManager:
                 max_tokens=256,
                 temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
+                **thinking_request_kwargs(),
             )
             merged = self._safe_text(extract_text_content(resp.content)).strip()
             if merged:

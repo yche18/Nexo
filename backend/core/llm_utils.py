@@ -1,5 +1,13 @@
 """LLM response helpers shared by Anthropic-compatible providers."""
-from typing import Any, Iterable, List
+import os
+from typing import Any, Dict, Iterable, List
+
+
+def thinking_request_kwargs() -> Dict[str, Any]:
+    """Explicitly disable thinking only when configured; otherwise keep provider defaults."""
+    if os.getenv("LLM_THINKING_ENABLED", "").strip().lower() == "false":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
 
 
 def extract_text_content(content: Iterable[Any]) -> str:

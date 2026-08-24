@@ -39,7 +39,7 @@ from agents.tools import (
     technical_tools,
 )
 from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
-from core.llm_utils import extract_text_content
+from core.llm_utils import extract_text_content, thinking_request_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +280,7 @@ class BaseAgent:
                     "system": self._build_system_prompt(req),
                     "messages": messages,
                 }
+                request_kwargs.update(thinking_request_kwargs())
                 if tools:
                     request_kwargs["tools"] = [
                         {
@@ -639,6 +640,7 @@ class ResponseComposer:
                 max_tokens=_env_int("NEXO_COMPOSER_MAX_TOKENS", 1000),
                 temperature=_env_float("NEXO_COMPOSER_TEMPERATURE", 0.1),
                 messages=[{"role": "user", "content": prompt}],
+                **thinking_request_kwargs(),
             )
             content = extract_text_content(response.content).strip()
             if content:

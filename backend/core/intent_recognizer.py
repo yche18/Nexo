@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from anthropic import AsyncAnthropic
 
-from core.llm_utils import extract_text_content
+from core.llm_utils import extract_text_content, thinking_request_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +252,7 @@ class IntentRecognizer:
                 max_tokens=256,
                 temperature=0.1,
                 messages=[{"role": "user", "content": prompt}],
+                **thinking_request_kwargs(),
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
