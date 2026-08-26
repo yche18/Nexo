@@ -567,8 +567,8 @@ class EscalationAgent(BaseAgent):
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
-        intent = req.intent.value if req.intent else "unknown"
-        urgency = req.urgency.name if req.urgency else "UNKNOWN"
+        import re
+
         entity_labels = {
             "target_system": "目标系统",
             "issue_description": "问题现象",
@@ -577,18 +577,76 @@ class EscalationAgent(BaseAgent):
             "requested_access": "申请权限",
             "purpose": "申请用途",
         }
-        details = [
-            f"{label}：{'、'.join(req.entities[key])}"
-            for key, label in entity_labels.items()
-            if (req.entities or {}).get(key)
-        ]
-        entities = "；".join(details) if details else "暂未提取到具体信息，请补充涉及的系统、问题现象或申请需求。"
-        content = (
-            "这个问题需要 IT 人工升级处理，请携带以下信息联系 IT 支持。\n\n"
-            f"升级原因：意图={intent}，紧急度={urgency}\n"
-            f"已记录信息：{entities}\n"
-            "请不要发送密码、短信验证码或完整密钥；以上仅为交接说明，尚未创建工单或通知 IT 人员。"
+        # 仅整理交接展示字段，不修改 req.entities 或全局实体提取规则。
+        aliases = {
+            "target_system": ("目标系统", "涉及系统", "系统名称", "应用名称"),
+            "issue_description": ("问题现象", "故障现象", "账号恢复", "问题"),
+            "date": ("发生时间", "故障时间"),
+            "error_code": ("错误码", "状态码"),
+            "requested_access": ("申请权限", "期望权限", "所需权限", "权限类型", "权限"),
+            "purpose": ("申请用途", "用途"),
+        }
+        context = req.context or ""
+        sources = []
+        if context.startswith("[会话摘要]\n"):
+            summary = context[len("[会话摘要]\n"):]
+            for header in ("[相关历史]", "[用户画像]", "[最近对话]"):
+                summary = summary.split("\n\n" + header, 1)[0]
+            sources.append(summary)
+        sources.extend(
+            message.get("content") or ""
+            for message in req.history or []
+            if message.get("role") in ("user", "assistant")
         )
+        if not req.history:
+            marker = "[最近对话]\n\n"
+            if context.startswith(marker):
+                sources.append(context[len(marker):])
+            elif "\n\n" + marker in context:
+                sources.append(context.split("\n\n" + marker, 1)[1])
+
+        fields = {}
+        for source in sources:
+            text = source.replace("**", "").replace("`", "")
+            for line in re.split(r"[\n；;]", text):
+                line = re.sub(r"^\s*(?:[-*>]+|\d+[.)、])\s*", "", line).strip()
+                for key, names in aliases.items():
+                    labels = "|".join(re.escape(name) for name in names)
+                    # 已确认的 Markdown 表格、字段列表及显式更正，后出现的值优先。
+                    match = re.match(rf"^\|\s*(?:{labels})\s*\|\s*([^|]+)\|", line)
+                    if not match:
+                        separator = r"(?:[:：=]|更正为|修改为|调整为|改为|改成|只需要|需要|是|为)"
+                        match = re.search(rf"(?:^|[，,。])\s*(?:{labels})\s*{separator}\s*(.+)", line)
+                    if match:
+                        value = match.group(1).strip().strip("。 ")
+                        if key != "issue_description":
+                            value = re.split(r"[，,。]", value, maxsplit=1)[0].strip()
+                        if value and not re.search(r"请提供|请补充|待补充|待确认|未提供|未知", value):
+                            fields[key] = value[:120]
+            # 为常见的非字段式问题描述保留简短要点，不转贴说明和排查步骤。
+            if "issue_description" not in fields:
+                issues = re.findall(r"忘记密码|绑定手机号已停用|手机号已停用|手机号停用|无法登录|登录失败|连接超时|连接失败|无法连接|崩溃|闪退", text)
+                if issues:
+                    fields["issue_description"] = "，".join(dict.fromkeys(issues))
+            if "purpose" not in fields:
+                purpose = re.search(r"(?:用于|用来)\s*([^，。；;！？!?\n]+)", text)
+                if purpose:
+                    fields["purpose"] = purpose.group(1).strip()[:120]
+            codes = re.findall(r"(?:错误码|状态码|报错?|HTTP)\s*[:：#]?\s*([45]\d{2})\b", text, re.I)
+            if codes:
+                fields["error_code"] = "、".join(dict.fromkeys(codes))
+        for key in entity_labels:
+            if (req.entities or {}).get(key):
+                fields[key] = "、".join(req.entities[key])[:120]
+
+        details = [f"- {label}：{fields[key]}" for key, label in entity_labels.items() if fields.get(key)]
+        sections = ["我已将您的问题标记为 IT 人工处理。"]
+        if details:
+            sections.append("**交接信息**\n" + "\n".join(details))
+        else:
+            sections.append("暂未提取到具体信息，请补充涉及的系统、问题现象或申请需求。")
+        sections.append("请不要发送密码、短信验证码或完整密钥；以上仅为交接说明，尚未创建工单或通知 IT 人员。")
+        content = "\n\n".join(sections)
         ms = (time.monotonic() - t0) * 1000
         self.stats.success += 1
         self.stats.total_ms += ms

@@ -82,7 +82,7 @@ def test_escalation_agent_is_a_real_non_llm_handoff_node():
 
     assert result.success is True
     assert result.escalate is True
-    assert "人工升级" in result.content
+    assert "标记为 IT 人工处理" in result.content
     assert client.calls == []
 
 
@@ -414,3 +414,158 @@ def test_it_handoff_wording_matches_existing_escalation_detection():
     agent = GeneralAgent(FakeClient(), "test-model")
     assert agent._needs_escalation("请转人工（IT 支持）确认。") is True
     assert agent._needs_escalation("请先检查网络连接。") is False
+
+
+HANDOFF_COLLECTED_INFORMATION = """好的，信息已补充完整。我帮您把交接说明整理成最终版本。
+
+## 一、账号恢复（忘记密码，手机号已停用）
+
+- 问题：忘记密码，自助重置时绑定手机号已停用
+- 处理方式：需 **人工（IT 支持）** 核验身份后重置，我无法代您处理，也不会索要密码或验证码。
+
+## 二、项目系统权限申请（信息已齐全）
+
+| 项目 | 内容 |
+|------|------|
+| 目标系统 | 项目系统（SAP 开发） |
+| 申请用途 | 查看需求 |
+| 期望权限 | 读写 + 编辑 |
+| 权限范围 | 全部项目 |
+| 部门 | dev 部门 |
+
+## 下一步：转人工（IT 支持）
+
+请携带以下完整信息联系 **IT 支持**，一并处理两件事：
+
+1. **账号恢复**：忘记密码，绑定手机号已停用，需人工核验身份后重置。
+2. **权限申请**：
+   - 目标系统 = 项目系统（SAP 开发）
+   - 申请用途 = 查看需求
+   - 期望权限 = 读写 + 编辑
+   - 权限范围 = 全部项目
+   - 部门 = dev 部门
+
+---
+
+**需要提醒您：**
+
+- “读写 + 编辑”属于可修改数据的权限，且申请范围为**全部项目**，审批会比只读、限定项目更严格，材料齐全不等于审批通过。
+- 我无法代您提交申请、查询审批状态或执行授权，实际开通需由 IT 支持按审批流程处理。
+- 登录报 401 属于认证问题，建议在联系 IT 时一并说明，由 IT 排查认证与授权两个环节。
+
+您的交接信息已整理完整，可直接用于联系 IT 支持。"""
+
+
+def test_handoff_preserves_collected_information_with_empty_current_entities():
+    from copy import deepcopy
+
+    client = FakeClient()
+    req = make_request(
+        message="那你帮我转交给人工吧",
+        intent=IntentCategory.HUMAN_HANDOFF,
+        entities={key: [] for key in (
+            "target_system", "issue_description", "date",
+            "error_code", "requested_access", "purpose",
+        )},
+        history=[{"role": "assistant", "content": HANDOFF_COLLECTED_INFORMATION}],
+    )
+    before = deepcopy(req)
+    result = asyncio.run(EscalationAgent(client, "unused").handle(req))
+
+    for value in ("忘记密码", "绑定手机号已停用", "SAP 开发", "查看需求",
+                  "读写 + 编辑", "401"):
+        assert value in result.content
+    assert "dev 部门" not in result.content
+    assert "全部项目" not in result.content
+    assert "近期会话" not in result.content
+    assert "**助手" not in result.content
+    assert "请携带" not in result.content
+    assert "审批会比" not in result.content
+    assert len(result.content) < 500
+    field_lines = [line for line in result.content.splitlines() if line.startswith("- ")]
+    assert len(field_lines) == 5
+    assert all(line.split("：", 1)[0] in {
+        "- 目标系统", "- 问题现象", "- 发生时间", "- 错误码", "- 申请权限", "- 申请用途",
+    } for line in field_lines)
+    assert "暂未提取到具体信息" not in result.content
+    assert result.content.startswith("我已将您的问题标记为 IT 人工处理。")
+    assert "尚未创建工单或通知 IT 人员" in result.content
+    assert req == before
+    assert result.escalate and result.success
+    assert result.tools_used == []
+    assert client.calls == []
+
+
+def test_handoff_keeps_session_summary_but_excludes_other_history_and_profile():
+    context = (
+        "[会话摘要]\n问题现象：忘记密码且手机号停用；目标系统：SAP 开发。\n\n"
+        "[相关历史]\n- 另一个会话的订单号 OTHER-123\n\n"
+        '[用户画像]\n{"department": "不属于本次申请的部门"}'
+    )
+    result = asyncio.run(EscalationAgent(FakeClient(), "unused").handle(make_request(
+        message="请转人工", intent=IntentCategory.HUMAN_HANDOFF,
+        entities={}, history=None, context=context,
+    )))
+    assert "问题现象：忘记密码且手机号停用" in result.content
+    assert "目标系统：SAP 开发" in result.content
+    assert "OTHER-123" not in result.content
+    assert "不属于本次申请的部门" not in result.content
+    assert "暂未提取到具体信息" not in result.content
+
+
+def test_handoff_displays_latest_confirmed_entity_fields_only():
+    req = make_request(
+        message="部门更正为 QA，请转人工。", intent=IntentCategory.HUMAN_HANDOFF,
+        entities={}, history=[
+            {"role": "assistant", "content": "申请权限：读写权限；权限范围：全部项目；部门：dev。"},
+            {"role": "user", "content": "范围更正为项目 A，权限只需要只读。"},
+        ],
+    )
+    result = asyncio.run(EscalationAgent(FakeClient(), "unused").handle(req))
+    assert "申请权限：只读" in result.content
+    for old_or_unrelated in ("读写权限", "全部项目", "dev", "QA", "项目 A", "更正为"):
+        assert old_or_unrelated not in result.content
+    assert req.entities == {}
+
+
+def test_handoff_requests_details_only_when_no_session_information_exists():
+    req = make_request(
+        message="转人工", intent=IntentCategory.HUMAN_HANDOFF, entities={}, history=[],
+        context='[相关历史]\n- 其他会话的 SAP 信息\n\n[用户画像]\n{"system": "SAP"}',
+    )
+    result = asyncio.run(EscalationAgent(FakeClient(), "unused").handle(req))
+    assert "暂未提取到具体信息" in result.content
+    assert "无需重复提供" not in result.content
+    assert "SAP" not in result.content
+
+
+def test_handoff_uses_current_context_messages_when_history_is_not_provided():
+    for prefix in ("", "[会话摘要]\n此前账号无法登录。\n\n",
+                   '[相关历史]\n- OTHER-456\n\n[用户画像]\n{"department": "其他部门"}\n\n'):
+        context = prefix + "[最近对话]\n\nuser: 已确认：\n目标系统：SAP 开发系统；申请用途：查看需求。"
+        result = asyncio.run(EscalationAgent(FakeClient(), "unused").handle(make_request(
+            message="请转人工", intent=IntentCategory.HUMAN_HANDOFF,
+            entities={}, history=None, context=context,
+        )))
+        assert "目标系统：SAP 开发系统" in result.content
+        assert "申请用途：查看需求" in result.content
+        assert "OTHER-456" not in result.content
+        assert "其他部门" not in result.content
+        assert "暂未提取到具体信息" not in result.content
+
+
+def test_handoff_displays_only_nonempty_current_entity_fields_without_mutating_them():
+    from copy import deepcopy
+
+    entities = {
+        "target_system": ["DemoPortal"], "issue_description": ["无法登录"],
+        "date": ["今天"], "error_code": ["401"],
+        "requested_access": ["只读权限"], "purpose": ["查看需求"],
+    }
+    req = make_request(message="转人工", intent=IntentCategory.HUMAN_HANDOFF, entities=entities)
+    before = deepcopy(req)
+    result = asyncio.run(EscalationAgent(FakeClient(), "unused").handle(req))
+    assert len([line for line in result.content.splitlines() if line.startswith("- ")]) == 6
+    for values in entities.values():
+        assert values[0] in result.content
+    assert req == before
