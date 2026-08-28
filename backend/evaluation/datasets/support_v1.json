@@ -1,0 +1,762 @@
+{
+  "version": "support-v1",
+  "origin": "Assistant-authored synthetic IT support cases; no production conversations; labels fixed before execution; not independently human-annotated.",
+  "scope": "60 single-label intent inputs and 10 three-turn dialogs; no external account/approval/ticket integrations.",
+  "split_policy": "40 development / 20 held-out intent cases; 7 development / 3 held-out dialog scenarios. Families have one example each; no paraphrase copies across splits.",
+  "intent_cases": [
+    {
+      "id": "i01",
+      "split": "dev",
+      "family": "documentation",
+      "message": "在哪里能查到公司办公软件的操作说明？",
+      "expected_intent": "query"
+    },
+    {
+      "id": "i02",
+      "split": "dev",
+      "family": "service_hours",
+      "message": "IT 服务台一般在什么时间提供支持？",
+      "expected_intent": "query"
+    },
+    {
+      "id": "i03",
+      "split": "dev",
+      "family": "vpn_guide",
+      "message": "第一次使用公司 VPN，需要先阅读哪些使用说明？",
+      "expected_intent": "query"
+    },
+    {
+      "id": "i04",
+      "split": "holdout",
+      "family": "installation_policy",
+      "message": "公司允许员工自己安装第三方办公软件吗？",
+      "expected_intent": "query"
+    },
+    {
+      "id": "i05",
+      "split": "dev",
+      "family": "printer_setup",
+      "message": "请帮我把这台电脑连接到办公室打印机。",
+      "expected_intent": "request"
+    },
+    {
+      "id": "i06",
+      "split": "dev",
+      "family": "software_install",
+      "message": "我需要你协助安装公司的办公客户端。",
+      "expected_intent": "request"
+    },
+    {
+      "id": "i07",
+      "split": "dev",
+      "family": "workstation_setup",
+      "message": "新电脑刚领到，请协助配置工作环境。",
+      "expected_intent": "request"
+    },
+    {
+      "id": "i08",
+      "split": "holdout",
+      "family": "mail_client_setup",
+      "message": "请帮我在电脑上配置邮件客户端。",
+      "expected_intent": "request"
+    },
+    {
+      "id": "i09",
+      "split": "dev",
+      "family": "slow_service",
+      "message": "上次报障后等了半天都没有回复，服务体验太差了。",
+      "expected_intent": "complaint"
+    },
+    {
+      "id": "i10",
+      "split": "dev",
+      "family": "repeated_explanation",
+      "message": "同一个问题让我反复解释，我对这次支持服务很不满意。",
+      "expected_intent": "complaint"
+    },
+    {
+      "id": "i11",
+      "split": "holdout",
+      "family": "unhelpful_support",
+      "message": "你们上次给的答复很敷衍，我要反馈一下这种糟糕的服务体验。",
+      "expected_intent": "complaint"
+    },
+    {
+      "id": "i12",
+      "split": "holdout",
+      "family": "missed_followup",
+      "message": "说好回访却一直没消息，这种服务让我很失望。",
+      "expected_intent": "complaint"
+    },
+    {
+      "id": "i13",
+      "split": "dev",
+      "family": "hello",
+      "message": "你好呀，IT 小助手。",
+      "expected_intent": "greeting"
+    },
+    {
+      "id": "i14",
+      "split": "dev",
+      "family": "morning",
+      "message": "早上好，今天也辛苦了。",
+      "expected_intent": "greeting"
+    },
+    {
+      "id": "i15",
+      "split": "dev",
+      "family": "presence",
+      "message": "嗨，在吗？",
+      "expected_intent": "greeting"
+    },
+    {
+      "id": "i16",
+      "split": "holdout",
+      "family": "afternoon",
+      "message": "下午好！",
+      "expected_intent": "greeting"
+    },
+    {
+      "id": "i17",
+      "split": "dev",
+      "family": "supervisor",
+      "message": "请让 IT 支持主管来处理这件事。",
+      "expected_intent": "escalation"
+    },
+    {
+      "id": "i18",
+      "split": "dev",
+      "family": "manager",
+      "message": "这个处理结果我不接受，我要找你们经理。",
+      "expected_intent": "escalation"
+    },
+    {
+      "id": "i19",
+      "split": "dev",
+      "family": "higher_level",
+      "message": "请将我的服务投诉升级到上一级负责人。",
+      "expected_intent": "escalation"
+    },
+    {
+      "id": "i20",
+      "split": "holdout",
+      "family": "management_review",
+      "message": "我要求由管理层复核这次服务处理结果。",
+      "expected_intent": "escalation"
+    },
+    {
+      "id": "i21",
+      "split": "dev",
+      "family": "human",
+      "message": "请转人工 IT 支持继续处理。",
+      "expected_intent": "human_handoff"
+    },
+    {
+      "id": "i22",
+      "split": "dev",
+      "family": "human_instead_of_bot",
+      "message": "我希望接下来由真人客服接手。",
+      "expected_intent": "human_handoff"
+    },
+    {
+      "id": "i23",
+      "split": "dev",
+      "family": "manual_channel",
+      "message": "帮我转到人工服务渠道吧。",
+      "expected_intent": "human_handoff"
+    },
+    {
+      "id": "i24",
+      "split": "holdout",
+      "family": "human_colleague",
+      "message": "机器人先不用回复了，请安排人工同事处理。",
+      "expected_intent": "human_handoff"
+    },
+    {
+      "id": "i25",
+      "split": "dev",
+      "family": "profile_name",
+      "message": "我的企业账号显示姓名写错了，应该在哪里修改？",
+      "expected_intent": "account"
+    },
+    {
+      "id": "i26",
+      "split": "dev",
+      "family": "mail_address",
+      "message": "我需要更新企业账户资料里的工作邮箱地址。",
+      "expected_intent": "account"
+    },
+    {
+      "id": "i27",
+      "split": "dev",
+      "family": "department_profile",
+      "message": "调到新部门后，企业账号中的部门资料怎么变更？",
+      "expected_intent": "account"
+    },
+    {
+      "id": "i28",
+      "split": "holdout",
+      "family": "avatar",
+      "message": "企业账户的头像和个人资料在哪儿编辑？",
+      "expected_intent": "account"
+    },
+    {
+      "id": "i29",
+      "split": "dev",
+      "family": "password_recovery",
+      "message": "我的企业账号密码忘记了，需要重置密码。",
+      "expected_intent": "account_security"
+    },
+    {
+      "id": "i30",
+      "split": "dev",
+      "family": "unknown_login",
+      "message": "发现企业账户被陌生设备登录，担心账号被盗。",
+      "expected_intent": "account_security"
+    },
+    {
+      "id": "i31",
+      "split": "holdout",
+      "family": "two_factor",
+      "message": "我想给工作账号开启两步验证，提高账户安全性。",
+      "expected_intent": "account_security"
+    },
+    {
+      "id": "i32",
+      "split": "holdout",
+      "family": "password_exposure",
+      "message": "工作账号密码可能泄露了，应该如何更换密码并保护账户？",
+      "expected_intent": "account_security"
+    },
+    {
+      "id": "i33",
+      "split": "dev",
+      "family": "project_access",
+      "message": "我需要申请项目管理系统的访问权限。",
+      "expected_intent": "permission_request"
+    },
+    {
+      "id": "i34",
+      "split": "dev",
+      "family": "vpn_access",
+      "message": "请告诉我开通企业 VPN 权限需要哪些材料。",
+      "expected_intent": "permission_request"
+    },
+    {
+      "id": "i35",
+      "split": "dev",
+      "family": "repo_access",
+      "message": "我要申请 GitLab 仓库的只读权限，用于查看代码。",
+      "expected_intent": "permission_request"
+    },
+    {
+      "id": "i36",
+      "split": "dev",
+      "family": "jira_access",
+      "message": "我刚加入项目组，想申请 Jira 的项目访问权限。",
+      "expected_intent": "permission_request"
+    },
+    {
+      "id": "i37",
+      "split": "holdout",
+      "family": "read_write",
+      "message": "现有权限只能看，想申请读写权限来编辑项目资料。",
+      "expected_intent": "permission_request"
+    },
+    {
+      "id": "i38",
+      "split": "holdout",
+      "family": "authorization_denied",
+      "message": "账号可以正常登录，但项目页面提示没有权限，我想申请访问这个项目。",
+      "expected_intent": "permission_request"
+    },
+    {
+      "id": "i39",
+      "split": "dev",
+      "family": "http401",
+      "message": "VPN 登录失败，提示错误码 401，怎么排查？",
+      "expected_intent": "technical_login"
+    },
+    {
+      "id": "i40",
+      "split": "dev",
+      "family": "verification_code",
+      "message": "企业登录页面的短信验证码一直收不到。",
+      "expected_intent": "technical_login"
+    },
+    {
+      "id": "i41",
+      "split": "dev",
+      "family": "login_loop",
+      "message": "输入账号密码后又跳回登录页面，始终无法登录。",
+      "expected_intent": "technical_login"
+    },
+    {
+      "id": "i42",
+      "split": "dev",
+      "family": "sso_failure",
+      "message": "公司的单点登录认证失败，系统进不去。",
+      "expected_intent": "technical_login"
+    },
+    {
+      "id": "i43",
+      "split": "holdout",
+      "family": "captcha_rejection",
+      "message": "验证码明明输入正确，还是显示验证失败，无法登录。",
+      "expected_intent": "technical_login"
+    },
+    {
+      "id": "i44",
+      "split": "holdout",
+      "family": "login_timeout",
+      "message": "登录企业系统时认证请求超时，尝试多次都登录失败。",
+      "expected_intent": "technical_login"
+    },
+    {
+      "id": "i45",
+      "split": "dev",
+      "family": "startup_exit",
+      "message": "办公客户端一打开就闪退，根本用不了。",
+      "expected_intent": "technical_crash"
+    },
+    {
+      "id": "i46",
+      "split": "dev",
+      "family": "save_crash",
+      "message": "点击保存后应用崩溃并退出，刚才的内容也没保存。",
+      "expected_intent": "technical_crash"
+    },
+    {
+      "id": "i47",
+      "split": "holdout",
+      "family": "update_crash",
+      "message": "软件更新后反复 crash，每次启动几秒就退出。",
+      "expected_intent": "technical_crash"
+    },
+    {
+      "id": "i48",
+      "split": "holdout",
+      "family": "error_and_crash",
+      "message": "应用先报 500 错误，随后崩溃关闭了。",
+      "expected_intent": "technical_crash"
+    },
+    {
+      "id": "i49",
+      "split": "dev",
+      "family": "network_connectivity",
+      "message": "办公电脑连不上公司内网，其他同事都可以连接。",
+      "expected_intent": "technical"
+    },
+    {
+      "id": "i50",
+      "split": "dev",
+      "family": "performance",
+      "message": "系统操作非常卡顿，切换页面要等很久，但没有崩溃。",
+      "expected_intent": "technical"
+    },
+    {
+      "id": "i51",
+      "split": "dev",
+      "family": "printer_failure",
+      "message": "打印机一直显示连接失败，文档无法打印。",
+      "expected_intent": "technical"
+    },
+    {
+      "id": "i52",
+      "split": "holdout",
+      "family": "audio_failure",
+      "message": "视频会议时麦克风没有声音，系统能识别设备但收不到音频。",
+      "expected_intent": "technical"
+    },
+    {
+      "id": "i53",
+      "split": "dev",
+      "family": "thanks",
+      "message": "问题解决了，感谢你耐心解释，服务很棒。",
+      "expected_intent": "feedback"
+    },
+    {
+      "id": "i54",
+      "split": "dev",
+      "family": "satisfaction",
+      "message": "这次 IT 支持处理得很及时，我非常满意。",
+      "expected_intent": "feedback"
+    },
+    {
+      "id": "i55",
+      "split": "dev",
+      "family": "positive_review",
+      "message": "我要给这次服务一个好评，说明很清楚。",
+      "expected_intent": "feedback"
+    },
+    {
+      "id": "i56",
+      "split": "holdout",
+      "family": "praise",
+      "message": "谢谢，按照你的说明已经恢复正常了，你们做得很好。",
+      "expected_intent": "feedback"
+    },
+    {
+      "id": "i57",
+      "split": "dev",
+      "family": "poem",
+      "message": "帮我写一首关于秋天的小诗。",
+      "expected_intent": "other"
+    },
+    {
+      "id": "i58",
+      "split": "dev",
+      "family": "cooking",
+      "message": "番茄炒蛋应该先放番茄还是先炒鸡蛋？",
+      "expected_intent": "other"
+    },
+    {
+      "id": "i59",
+      "split": "holdout",
+      "family": "travel",
+      "message": "周末出去玩，海边和山里哪个更适合散步？",
+      "expected_intent": "other"
+    },
+    {
+      "id": "i60",
+      "split": "holdout",
+      "family": "arithmetic",
+      "message": "三十七乘以二十四等于多少？",
+      "expected_intent": "other"
+    }
+  ],
+  "dialog_cases": [
+    {
+      "id": "d01",
+      "split": "dev",
+      "name": "办公设备配置咨询",
+      "turns": [
+        {
+          "message": "我需要配置办公室打印机，请指导一下。",
+          "agent_in": [
+            "general"
+          ]
+        },
+        {
+          "message": "使用 Windows 电脑，打印机已经连上公司内网。"
+        },
+        {
+          "message": "请列出我接下来应该操作的步骤。",
+          "contains_all": [
+            "打印机"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d02",
+      "split": "dev",
+      "name": "登录故障信息交接",
+      "turns": [
+        {
+          "message": "VPN 登录失败，提示错误码 401。",
+          "agent_in": [
+            "technical"
+          ]
+        },
+        {
+          "message": "目标系统：VPN；问题现象：登录失败；错误码：401。退出重新登录后仍然一样。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**"
+          ],
+          "fields": {
+            "目标系统": [
+              "VPN"
+            ],
+            "错误码": [
+              "401"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d03",
+      "split": "dev",
+      "name": "权限申请补齐信息",
+      "turns": [
+        {
+          "message": "我想申请项目管理系统的权限，需要提供什么？",
+          "agent_in": [
+            "access"
+          ]
+        },
+        {
+          "message": "目标系统：项目管理系统；申请权限：只读权限；申请用途：查看需求。"
+        },
+        {
+          "message": "我刚才提供的信息是否齐全，下一步怎么处理？",
+          "agent_in": [
+            "access"
+          ],
+          "contains_all": [
+            "项目管理系统",
+            "查看需求"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d04",
+      "split": "dev",
+      "name": "密码恢复与手机号停用",
+      "turns": [
+        {
+          "message": "企业账号忘记密码了，我想重置密码。",
+          "agent_in": [
+            "access"
+          ]
+        },
+        {
+          "message": "目标系统：企业邮箱；问题现象：忘记密码，绑定手机号已停用，无法接收验证码。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**"
+          ],
+          "fields": {
+            "问题现象": [
+              "忘记密码",
+              "手机号已停用"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d05",
+      "split": "dev",
+      "name": "权限更正后交接",
+      "turns": [
+        {
+          "message": "目标系统：GitLab；申请权限：读写权限；申请用途：查看代码。请说明申请流程。",
+          "agent_in": [
+            "access"
+          ]
+        },
+        {
+          "message": "更正一下，申请权限：只读权限；目标系统和申请用途不变。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**",
+            "读写权限"
+          ],
+          "fields": {
+            "申请权限": [
+              "只读"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d06",
+      "split": "dev",
+      "name": "目标系统更正后交接",
+      "turns": [
+        {
+          "message": "目标系统：项目管理系统；申请权限：只读权限；申请用途：查看需求。我需要申请权限。",
+          "agent_in": [
+            "access"
+          ]
+        },
+        {
+          "message": "刚才系统说错了，目标系统：Jira；申请用途仍然是查看需求。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**",
+            "目标系统：项目管理系统"
+          ],
+          "fields": {
+            "目标系统": [
+              "Jira"
+            ],
+            "申请用途": [
+              "查看需求"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d07",
+      "split": "dev",
+      "name": "崩溃错误时间交接",
+      "turns": [
+        {
+          "message": "办公客户端一打开就闪退，还出现了 500 错误。",
+          "agent_in": [
+            "technical"
+          ]
+        },
+        {
+          "message": "问题现象：启动闪退；错误码：500；发生时间：今天。重启后还是这样。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**"
+          ],
+          "fields": {
+            "错误码": [
+              "500"
+            ],
+            "发生时间": [
+              "今天"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d08",
+      "split": "holdout",
+      "name": "异常登录交接",
+      "turns": [
+        {
+          "message": "企业账户出现陌生设备登录，我怀疑账号被盗。",
+          "agent_in": [
+            "access"
+          ]
+        },
+        {
+          "message": "目标系统：企业邮箱；问题现象：企业账号异常登录；发生时间：昨天。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**"
+          ],
+          "fields": {
+            "目标系统": [
+              "企业邮箱"
+            ],
+            "发生时间": [
+              "昨天"
+            ],
+            "问题现象": [
+              "异常登录"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d09",
+      "split": "holdout",
+      "name": "登录与权限混合诉求",
+      "turns": [
+        {
+          "message": "VPN 登录失败并报 401，另外需要申请项目权限，用于查看需求。",
+          "agents_include": [
+            "technical",
+            "access"
+          ]
+        },
+        {
+          "message": "目标系统：项目管理系统；申请权限：只读权限；申请用途：查看需求。VPN 登录仍然报 401。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**"
+          ],
+          "fields": {
+            "申请权限": [
+              "只读"
+            ],
+            "申请用途": [
+              "查看需求"
+            ],
+            "错误码": [
+              "401"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "d10",
+      "split": "holdout",
+      "name": "缺失用途不应编造",
+      "turns": [
+        {
+          "message": "目标系统：Jira；申请权限：只读权限。我还没有确定申请用途，先问一下申请流程。",
+          "agent_in": [
+            "access"
+          ]
+        },
+        {
+          "message": "申请用途暂时不确定，先不填写。"
+        },
+        {
+          "message": "那请转人工 IT 支持处理。",
+          "agent_in": [
+            "escalation"
+          ],
+          "not_contains": [
+            "近期会话",
+            "**助手：**",
+            "**用户：**"
+          ],
+          "fields": {
+            "目标系统": [
+              "Jira"
+            ]
+          },
+          "fields_absent": [
+            "申请用途"
+          ]
+        }
+      ]
+    }
+  ]
+}
