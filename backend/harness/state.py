@@ -9,6 +9,7 @@ import uuid
 FACT_FIELDS = (
     "target_system", "issue_description", "date", "error_code",
     "requested_access", "purpose", "operating_system", "client_version",
+    "network_type", "impact_scope", "device_type", "device_model",
 )
 STATUSES = ("collecting", "waiting_user", "handoff_ready", "resolved")
 CORRECTION = re.compile(r"说错|更正|改为|改成|不是.+是|实际是|纠正")
@@ -29,7 +30,8 @@ PROGRESS_SCHEMA = {
         "facts": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
             "properties": {
-                "field": {"type": "string", "enum": list(FACT_FIELDS)},
+                "field": {"type": "string", "enum": list(FACT_FIELDS),
+                          "description": "network_type 为故障网络环境，impact_scope 为影响范围，device_type/device_model 为设备种类和型号；只记录用户明确提供的信息。"},
                 "value": {"type": "string"}, "source_quote": {"type": "string"},
                 "correction": {"type": "boolean"},
             }, "required": ["field", "value", "source_quote"]}},
@@ -108,7 +110,7 @@ def _completed_action(quote, context, description):
     # A later failed outcome is different from negating the action itself.
     if re.search(r"如果|假如|要是", context):
         raise ValueError("条件描述不能标记为已执行")
-    actions = r"重启|登录|登陆|切换|更换|换|执行|操作|尝试|试|检查|关闭|打开|安装|卸载|更新|重置|清理|断开|连接|重连|禁用|启用"
+    actions = r"重启|登录|登陆|切换|更换|换|执行|操作|尝试|试|检查|关闭|打开|安装|卸载|更新|重置|清理|断开|连接|重连|禁用|启用|取纸|取出卡纸|清除卡纸|拔下电源|拔掉电源|拔电源|断电|插拔"
     matches = list(re.finditer(actions, quote))
     selected = [match for match in matches if match.group() in description]
     if selected:

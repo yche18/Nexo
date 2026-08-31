@@ -109,10 +109,12 @@ def test_default_corpus_keeps_original_ids_and_content():
     kb._load_default_docs()
     path = Path(__file__).parents[1] / "evaluation/datasets/rag_support_v1.json"
     corpus = json.loads(path.read_text(encoding="utf-8"))["corpus"]
-    expected = {item["id"]: item for item in corpus}
-    for chunk_id, (content, meta) in kb._collection.rows.items():
-        assert chunk_id in expected
-        item = expected[chunk_id]
+    # The frozen evaluation corpus also contains one manually imported supplement.
+    # New domain documents may be added, but every original default must survive unchanged.
+    expected = {item["id"]: item for item in corpus if item["title"] != "权限申请补充规范"}
+    assert len(expected) == 6
+    for chunk_id, item in expected.items():
+        content, meta = kb._collection.rows[chunk_id]
         assert content == item["content"]
         assert meta["title"] == item["title"]
         assert meta["chunk_index"] == item["chunk"]

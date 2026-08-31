@@ -89,8 +89,8 @@ async def run_agent(agent, req):
             tool_uses = [block for block in (resp.content or []) if agent._block_type(block) == "tool_use"]
             if not tool_uses:
                 intent = getattr(req.intent, "value", "")
-                business_intent = intent.startswith(("technical", "access", "permission", "account"))
-                business_agent = agent.agent_type.value in {"technical", "access"}
+                business_intent = intent.startswith(("technical", "access", "permission", "account", "network", "device", "software"))
+                business_agent = agent.agent_type.value in {"technical", "access", "network", "device"}
                 if mode == "enforce" and (business_intent or business_agent) and not updates:
                     event("progress_not_recorded", reason="no_valid_progress_update", status="unknown")
                 event("run_finished", reason="answer_ready", rounds=turn + 1)
