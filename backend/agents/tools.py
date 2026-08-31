@@ -233,7 +233,7 @@ def technical_tools() -> Dict[str, AgentToolSpec]:
         ),
         "build_diagnostic_plan": make_tool(
             "build_diagnostic_plan",
-            "根据运行环境和是否可复现生成排障顺序，不执行修改配置等操作。",
+            "提供通用低风险排查清单，仅在没有适用的知识库 SOP 时使用；不读取设备状态，不执行修复操作。",
             {
                 "environment": {"type": "string", "description": "App、浏览器、服务端或 Docker 等"},
                 "reproduced": {"type": "boolean", "description": "问题是否可以稳定复现"},
