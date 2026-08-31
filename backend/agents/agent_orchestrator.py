@@ -16,6 +16,7 @@
   - Agent 置信度低于阈值 → 自动升级到更高级 Agent 或转人工
 """
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -119,6 +120,8 @@ class AgentResponse:
     escalate:    bool  = False   # 是否需要升级
     tools_used:  List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    harness_events: List[Dict[str, Any]] = field(default_factory=list)
+    state_updates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +130,8 @@ class AgentCallResult:
     content: str
     tools_used: List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    harness_events: List[Dict[str, Any]] = field(default_factory=list)
+    state_updates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class AgentCallError(RuntimeError):
@@ -136,6 +141,8 @@ class AgentCallError(RuntimeError):
         super().__init__(message)
         self.tools_used = list(tools_used)
         self.tool_traces = list(tool_traces)
+        self.harness_events = []
+        self.state_updates = []
 
 
 @dataclass
@@ -151,6 +158,8 @@ class Request:
     urgency:     Optional[UrgencyLevel]   = None
     intent_confidence: float = 1.0
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    case_state: Dict[str, Any] = field(default_factory=dict)
+    harness_mode: Optional[str] = None
 
 
 @dataclass
@@ -166,8 +175,13 @@ class OrchestratorResult:
     supporting_agents: List[AgentType] = field(default_factory=list)
     tools_used: List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    harness_events: List[Dict[str, Any]] = field(default_factory=list)
+    state_updates: List[Dict[str, Any]] = field(default_factory=list)
     routing_reason: str = ""
     routing_confidence: float = 0.0
+    case_state: Dict[str, Any] = field(default_factory=dict)
+    validation: Dict[str, Any] = field(default_factory=dict)
+    execution_success: bool = True
 
 
 @dataclass
@@ -234,6 +248,8 @@ class BaseAgent:
                 escalate=escalate,
                 tools_used=call_result.tools_used,
                 tool_traces=call_result.tool_traces,
+                harness_events=call_result.harness_events,
+                state_updates=call_result.state_updates,
             )
         except Exception as ex:
             ms = (time.monotonic() - t0) * 1000
@@ -248,127 +264,13 @@ class BaseAgent:
                 latency_ms=ms,
                 tools_used=list(tools_used),
                 tool_traces=list(tool_traces),
+                harness_events=getattr(ex, "harness_events", []),
+                state_updates=getattr(ex, "state_updates", []),
             )
 
     async def _call_llm(self, req: Request) -> AgentCallResult:
-        def _clean(s: str) -> str:
-            return s.encode("utf-8", errors="ignore").decode("utf-8")
-
-        messages = []
-        if req.context:
-            messages.append({"role": "user", "content": f"[背景信息]\n{_clean(req.context)}"})
-            messages.append({"role": "assistant", "content": "好的，我已了解背景信息。"})
-        if req.entities:
-            entities_text = json.dumps(req.entities, ensure_ascii=False)
-            messages.append({"role": "user", "content": f"[结构化实体]\n{_clean(entities_text)}"})
-            messages.append({"role": "assistant", "content": "好的，我会结合这些结构化实体处理。"})
-        role_packet = self._build_role_packet(req)
-        if role_packet:
-            messages.append({"role": "user", "content": f"[角色输入契约]\n{_clean(role_packet)}"})
-            messages.append({"role": "assistant", "content": "好的，我会按照该角色的输入和输出契约处理。"})
-        messages.append({"role": "user", "content": _clean(req.message)})
-
-        tools = self.get_tools()
-        tools_used: List[str] = []
-        tool_traces: List[Dict[str, Any]] = []
-        try:
-            for _ in range(3):
-                request_kwargs: Dict[str, Any] = {
-                    "model": self._model,
-                    "max_tokens": self.profile.max_tokens,
-                    "temperature": self.profile.temperature,
-                    "system": self._build_system_prompt(req),
-                    "messages": messages,
-                }
-                request_kwargs.update(thinking_request_kwargs())
-                if tools:
-                    request_kwargs["tools"] = [
-                        {
-                            "name": spec.name,
-                            "description": spec.description,
-                            "input_schema": spec.input_schema,
-                        }
-                        for spec in tools.values()
-                    ]
-                resp = await self._client.messages.create(**request_kwargs)
-                tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
-                if not tool_uses:
-                    return AgentCallResult(
-                        content=extract_text_content(resp.content),
-                        tools_used=list(tools_used),
-                        tool_traces=list(tool_traces),
-                    )
-
-                messages.append({"role": "assistant", "content": resp.content})
-                tool_results = []
-                for block in tool_uses:
-                    name = self._block_value(block, "name")
-                    tool_use_id = self._block_value(block, "id")
-                    args = self._block_value(block, "input") or {}
-                    spec = tools.get(name)
-                    tool_t0 = time.monotonic()
-                    call_success = True
-                    result_success: Optional[bool] = None
-                    error_text = ""
-                    if spec is None:
-                        call_success = False
-                        result: Any = {"success": False, "error": f"工具不在 {self.agent_type.value} Agent 白名单中"}
-                        error_text = result["error"]
-                    else:
-                        try:
-                            self._validate_tool_input(spec, args)
-                            result = spec.handler(req, args)
-                            if inspect.isawaitable(result):
-                                result = await result
-                            tools_used.append(name)
-                            if isinstance(result, dict) and "success" in result:
-                                result_success = bool(result.get("success"))
-                        except Exception as ex:
-                            call_success = False
-                            logger.warning("Agent 工具 %s 执行失败: %s", name, ex)
-                            error_text = str(ex)
-                            result = {"success": False, "error": error_text}
-                    tool_latency_ms = (time.monotonic() - tool_t0) * 1000
-                    if not error_text and isinstance(result, dict):
-                        error_text = str(result.get("error", "") or "")
-                    tool_traces.append(
-                        {
-                            "agent_type": self.agent_type.value,
-                            "tool_name": name,
-                            "tool_use_id": tool_use_id,
-                            "input": dict(args),
-                            "success": call_success,
-                            "result_success": result_success,
-                            "latency_ms": round(tool_latency_ms, 1),
-                            "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
-                            "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
-                            "retrieval": result.get("retrieval", {}) if isinstance(result, dict) else {},
-                            "error": error_text,
-                        }
-                    )
-                    # 完整证据已在 results 中；trace 保留证据，模型只接收一份。
-                    if isinstance(result, dict) and result.get("retrieval"):
-                        result = dict(result)
-                        result["retrieval"] = {
-                            key: value for key, value in result["retrieval"].items()
-                            if key != "evidence"
-                        }
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    })
-                messages.append({"role": "user", "content": tool_results})
-
-            raise AgentCallError(
-                f"{self.agent_type.value} 工具调用超过最大轮数",
-                tools_used,
-                tool_traces,
-            )
-        except AgentCallError:
-            raise
-        except Exception as ex:
-            raise AgentCallError(str(ex), tools_used, tool_traces) from ex
+        from harness.runtime import run_agent
+        return await run_agent(self, req)
 
     @staticmethod
     def _block_type(block: Any) -> Optional[str]:
@@ -572,6 +474,23 @@ class EscalationAgent(BaseAgent):
         tools.update(escalation_tools())
         return tools
 
+    @staticmethod
+    def latest_user_report(req):
+        """Keep the user's latest report as a quote, not an executed-step claim."""
+        import re
+        message = (req.message or "").strip()
+        handoff_only = re.fullmatch(
+            r"(?:那你|那|请你|请|麻烦你|麻烦)?(?:帮我)?(?:转(?:接|交)?给?人工(?:客服)?|联系人工(?:客服)?)(?:吧|一下|处理)?[。！!？?\s]*",
+            message,
+        )
+        if message and not handoff_only:
+            return {"content": message, "source": "user_reported", "request_id": req.request_id}
+        if not req.case_state.get("new_topic"):
+            previous = req.case_state.get("latest_user_report", {})
+            if previous.get("source") == "user_reported":
+                return dict(previous)
+        return {}
+
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
@@ -613,6 +532,14 @@ class EscalationAgent(BaseAgent):
             elif "\n\n" + marker in context:
                 sources.append(context.split("\n\n" + marker, 1)[1])
 
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce":
+            # 助手建议与自动摘要不能作为用户已确认的交接事实。
+            sources = [message.get("content") or "" for message in req.history or []
+                       if message.get("role") == "user"]
+            if req.case_state.get("new_topic"):
+                sources = []
+            sources.append(req.message)
         fields = {}
         for source in sources:
             text = source.replace("**", "").replace("`", "")
@@ -643,16 +570,43 @@ class EscalationAgent(BaseAgent):
             codes = re.findall(r"(?:错误码|状态码|报错?|HTTP)\s*[:：#]?\s*([45]\d{2})\b", text, re.I)
             if codes:
                 fields["error_code"] = "、".join(dict.fromkeys(codes))
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            # 未确认候选不能通过旧助手回复或摘要重新成为交接事实。
+            for candidate in req.case_state.get("candidates", []):
+                fields.pop(candidate.get("field"), None)
         for key in entity_labels:
             if (req.entities or {}).get(key):
                 fields[key] = "、".join(req.entities[key])[:120]
 
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            from harness.state import handoff_fields
+            fields.update(handoff_fields(req.case_state))
+            for conflict in req.case_state.get("conflicts", []):
+                fields.pop(conflict.get("field"), None)
         details = [f"- {label}：{fields[key]}" for key, label in entity_labels.items() if fields.get(key)]
         sections = ["我已将您的问题标记为 IT 人工处理。"]
         if details:
             sections.append("**交接信息**\n" + "\n".join(details))
         else:
             sections.append("暂未提取到具体信息，请补充涉及的系统、问题现象或申请需求。")
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            completed = [step for step in req.case_state.get("steps", [])
+                         if step.get("status") == "user_reported_done"
+                         and step.get("source") == "user_reported"
+                         and step.get("source_quote") and step.get("result")]
+            if completed:
+                step_lines = [f"- {str(step.get('description', ''))[:120]}：{str(step['result'])[:120]}"
+                              for step in completed[-4:]]
+                sections.append("**已尝试及结果（用户反馈）**\n" + "\n".join(step_lines))
+        if (req.harness_mode or harness_mode()) == "enforce":
+            report = self.latest_user_report(req)
+            if report.get("content"):
+                quoted = report["content"][:300]
+                if len(report["content"]) > 300:
+                    quoted += "…"
+                sections.append("**最新反馈（用户原话）**\n" + quoted
+                                + "\n以上是用户反馈，待 IT 人员核验，不代表系统已代为执行或确认解决。")
         sections.append("请不要发送密码、短信验证码或完整密钥；以上仅为交接说明，尚未创建工单或通知 IT 人员。")
         content = "\n\n".join(sections)
         ms = (time.monotonic() - t0) * 1000
@@ -696,6 +650,9 @@ class ResponseComposer:
             f"用户问题：{req.message}\n"
             f"候选结果：\n{evidence}"
         )
+        from harness.context import case_context, harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            prompt += "\n\n" + case_context(req.case_state)
         if self._skill_manager is not None:
             skill = self._skill_manager.prompt_for(req.message, "general")
             if skill:
@@ -829,6 +786,9 @@ class AgentOrchestrator:
             "tool_calls": list(result.tool_traces),
             "escalated": result.escalated,
             "latency_ms": round(result.latency_ms, 1),
+            "harness_events": list(result.harness_events),
+            "validation": dict(result.validation),
+            "case_state": dict(result.case_state),
         }
         self._recent_tool_traces.append(trace)
 
@@ -874,8 +834,7 @@ class AgentOrchestrator:
                 routing_reason="低置信度 OTHER 意图，先澄清用户需求",
                 routing_confidence=req.intent_confidence,
             )
-            self._record_tool_trace(result)
-            return result
+            return await self._finalize_result(req, result)
 
         # 复杂问题自动并行协作，例如同一句同时涉及登录故障和扣款/退款。
         decision = self._route_decision(req)
@@ -907,11 +866,13 @@ class AgentOrchestrator:
             supporting_agents=[],
             tools_used=list(response.tools_used),
             tool_traces=list(response.tool_traces),
+            execution_success=response.success,
+            harness_events=list(response.harness_events),
+            state_updates=list(response.state_updates),
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
-        self._record_tool_trace(result)
-        return result
+        return await self._finalize_result(req, result)
 
     async def run_parallel(self, req: Request, decision: RoutingDecision) -> OrchestratorResult:
         """
@@ -924,7 +885,19 @@ class AgentOrchestrator:
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_responses = [r for r in responses if isinstance(r, AgentResponse)]
-        combined = await self._composer.compose(req, valid_responses)
+        from harness.context import harness_mode
+        mode = req.harness_mode or harness_mode()
+        merged_state = {}
+        merge_events = []
+        composer_req = req
+        if mode == "enforce":
+            merged_state = self._merge_case_state(
+                req, [update for response in valid_responses for update in response.state_updates],
+                [trace for response in valid_responses for trace in response.tool_traces],
+                merge_events,
+            )
+            composer_req = replace(req, case_state=merged_state)
+        combined = await self._composer.compose(composer_req, valid_responses)
         escalated = any(isinstance(r, AgentResponse) and r.escalate for r in responses)
         tools_used = list(dict.fromkeys(
             tool_name
@@ -951,9 +924,88 @@ class AgentOrchestrator:
             supporting_agents=decision.supporting_agents,
             tools_used=tools_used,
             tool_traces=tool_traces,
+            harness_events=[event for response in valid_responses for event in response.harness_events] + merge_events,
+            state_updates=[update for response in valid_responses for update in response.state_updates],
+            case_state=merged_state,
+            execution_success=any(response.success and response.content.strip() for response in valid_responses),
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
+        return await self._finalize_result(req, result)
+
+    @staticmethod
+    def _merge_case_state(req, updates, traces, events):
+        from harness.state import apply_progress, new_case
+        from harness.runtime import evidence_ids
+        state = req.case_state or new_case(req.user_id, req.conv_id)
+        topic_reset = False
+        for update in updates:
+            candidate = dict(update)
+            if candidate.get("new_case") and topic_reset:
+                candidate.pop("new_case")
+            try:
+                state = apply_progress(state, candidate, req.message, req.request_id,
+                                       evidence_refs=evidence_ids(traces))
+                topic_reset = topic_reset or bool(candidate.get("new_case"))
+            except ValueError as ex:
+                events.append({"event": "state_update_rejected", "reason": str(ex)})
+        return state
+
+    async def _finalize_result(self, req: Request, result: OrchestratorResult) -> OrchestratorResult:
+        """One delivery boundary for single, composed and fallback answers."""
+        finalize_started = time.monotonic()
+        from harness.context import harness_mode
+        from harness.runtime import evidence_ids
+        from harness.state import apply_progress, new_case
+        from harness.validation import ValidationResult, finalize_answer
+
+        mode = req.harness_mode or harness_mode()
+        if mode == "enforce":
+            if not result.case_state:
+                result.case_state = self._merge_case_state(req, result.state_updates,
+                                                          result.tool_traces, result.harness_events)
+        else:
+            result.case_state = dict(req.case_state or {})
+        if mode == "enforce" and not result.execution_success:
+            checked = ValidationResult(
+                content=result.response, status="runtime_failed", escalated=True,
+                issues=["Agent 执行失败，未生成可核验的最终回答"],
+                events=[{"event": "runtime_failure_handoff", "reason": "all_agent_attempts_failed"}],
+            )
+        else:
+            checked = await finalize_answer(
+                req.message, result.response, result.tool_traces,
+                self._composer._client, self._composer._model, mode,
+                case_state=result.case_state,
+            )
+        result.response = checked.content
+        result.validation = {"status": checked.status, "issues": checked.issues,
+                             "extra_calls": checked.extra_calls, "repair_count": checked.repair_count}
+        result.harness_events.extend(checked.events)
+        result.escalated = result.escalated or checked.escalated
+        if mode == "enforce" and checked.status in {"needs_handoff", "runtime_failed"}:
+            handoff = self._best_agent(AgentType.ESCALATION)
+            if handoff is not None:
+                handoff_req = replace(req, case_state=result.case_state)
+                handoff_result = await handoff.handle(handoff_req)
+                result.response = handoff_result.content
+                result.agent_type = AgentType.ESCALATION
+                if AgentType.ESCALATION not in result.agent_types:
+                    result.agent_types.append(AgentType.ESCALATION)
+                result.harness_events.append({"event": "validation_handoff"})
+        explicit_handoff = (
+            req.intent in {IntentCategory.HUMAN_HANDOFF, IntentCategory.ESCALATION}
+            or result.agent_type == AgentType.ESCALATION
+            or result.primary_agent == AgentType.ESCALATION
+            or checked.status in {"needs_handoff", "runtime_failed"}
+        )
+        if mode == "enforce" and explicit_handoff and result.case_state:
+            result.case_state = copy.deepcopy(result.case_state)
+            report = EscalationAgent.latest_user_report(replace(req, case_state=result.case_state))
+            if report:
+                result.case_state["latest_user_report"] = report
+            result.case_state["status"] = "handoff_ready"
+        result.latency_ms += (time.monotonic() - finalize_started) * 1000
         self._record_tool_trace(result)
         return result
 
@@ -1207,7 +1259,32 @@ class AgentOrchestrator:
             logger.warning(f"{agent_type.value} 失败，降级到 GeneralAgent")
             fallback = self._best_agent(AgentType.GENERAL)
             if fallback:
-                response = await fallback.handle(req)
+                previous = response
+                from harness.context import harness_mode
+                from harness.runtime import evidence_ids
+                from harness.state import apply_progress, new_case
+                mode = req.harness_mode or harness_mode()
+                fallback_req = req
+                if mode == "enforce":
+                    state = self._merge_case_state(req, previous.state_updates,
+                                                   previous.tool_traces, previous.harness_events)
+                    evidence = [item for call in previous.tool_traces
+                                if call.get("tool_name") == "search_knowledge_base"
+                                and call.get("success") and call.get("result_success") is not False
+                                for item in (call.get("retrieval") or {}).get("evidence", [])]
+                    context = req.context
+                    if evidence:
+                        context += "\n\n[本次处理已经返回的知识库资料]\n" + json.dumps(evidence, ensure_ascii=False)
+                    fallback_req = replace(req, case_state=state, context=context)
+                response = await fallback.handle(fallback_req)
+                if mode == "enforce":
+                    response.tools_used = list(dict.fromkeys(previous.tools_used + response.tools_used))
+                    response.tool_traces = previous.tool_traces + response.tool_traces
+                    response.state_updates = previous.state_updates + response.state_updates
+                if mode != "off":
+                    response.harness_events = previous.harness_events + [
+                        {"event": "agent_fallback", "from": agent_type.value, "to": "general"}
+                    ] + response.harness_events
 
         return response
 

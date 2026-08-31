@@ -49,6 +49,7 @@ _tool_manager = None
 _monitor      = None
 _evaluator    = None
 _skill_manager = None
+_case_store = None
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -66,7 +67,7 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
+    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager, _case_store
 
     print(BANNER, flush=True)
 
@@ -117,6 +118,10 @@ async def lifespan(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
     )
+
+    # 独立任务快照复用 Redis 连接，不参与历史摘要压缩。
+    from harness.state import CaseStore
+    _case_store = CaseStore(_memory._redis)
 
     # MCP 工具管理器 + RAG 知识库（基于 ChromaDB 的真实检索）
     _tool_manager = MCPToolManager(
@@ -267,6 +272,8 @@ class ChatResponse(BaseModel):
     entities: Dict[str, List[str]] = Field(default_factory=dict)
     intent_confidence: float = 0.0
     intent_source_scores: Dict[str, float] = Field(default_factory=dict)
+    case_state: Dict[str, Any] = Field(default_factory=dict)
+    harness_events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ToolTraceResponse(BaseModel):
@@ -317,6 +324,8 @@ async def chat(req: ChatRequest):
 
     from agents.agent_orchestrator import Request as OrcReq
     from memory.conversation_memory import MsgRole
+    from harness.context import harness_mode, case_history
+    from harness.state import CaseConflictError, prepare_case
 
     conv_id = req.conv_id or str(uuid.uuid4())
 
@@ -332,6 +341,16 @@ async def chat(req: ChatRequest):
     intent_result = await _orchestrator.recognize_intent(req.message, history=history)
     full_context = mem_ctx.to_prompt_text()
 
+    # 路由输入保持原样，只有 enforce 模式读取独立任务状态。
+    mode = harness_mode()
+    case = {}
+    if mode == "enforce":
+        if _case_store is None:
+            raise HTTPException(503, "任务状态存储未就绪")
+        case = prepare_case(await _case_store.load(req.user_id, conv_id), req.message)
+        if case.get("isolate_history"):
+            full_context, history = case_history(mem_ctx, case)
+
     orch_req = OrcReq(
         message=req.message,
         user_id=req.user_id,
@@ -343,14 +362,30 @@ async def chat(req: ChatRequest):
         intent_group=intent_result.intent_group,
         urgency=intent_result.urgency,
         intent_confidence=intent_result.confidence,
+        case_state=case,
+        harness_mode=mode,
     )
 
     # 3. 执行
     result = await _orchestrator.run(orch_req)
 
+    saved_case = {}
+    if mode == "enforce":
+        try:
+            saved_case = await _case_store.save(
+                result.case_state or case, expected_version=case.get("version", 0),
+            )
+        except CaseConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     # 4. 写入记忆
-    await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
-    await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
+    if mode == "enforce":
+        metadata = {"case_id": saved_case["case_id"]}
+        await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message, metadata=metadata)
+        await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response, metadata=metadata)
+    else:
+        await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
+        await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
 
     # 5. 异步更新用户画像（不阻塞响应）
     asyncio.create_task(_memory.update_profile(req.user_id, conv_id))
@@ -374,6 +409,9 @@ async def chat(req: ChatRequest):
         entities=intent_result.entities,
         intent_confidence=round(intent_result.confidence, 4),
         intent_source_scores=intent_result.source_scores,
+        case_state={key: value for key, value in saved_case.items()
+                    if key not in ("user_id", "conv_id")},
+        harness_events=getattr(result, "harness_events", []),
     )
 
 
