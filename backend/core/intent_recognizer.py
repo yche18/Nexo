@@ -33,6 +33,8 @@ class IntentCategory(Enum):
     GREETING   = "greeting"    # 问候
     ESCALATION = "escalation"  # 要求升级/转人工
     TECHNICAL  = "technical"   # 技术问题
+    NETWORK    = "network"     # 网络支持
+    DEVICE     = "device"      # 设备支持
     ACCOUNT    = "account"     # 账户管理
     FEEDBACK   = "feedback"    # 正面反馈
     ACCOUNT_SECURITY = "account_security" # 账户安全
@@ -40,6 +42,9 @@ class IntentCategory(Enum):
     TECHNICAL_CRASH = "technical_crash"  # 崩溃/错误码
     HUMAN_HANDOFF = "human_handoff"      # 转人工
     PERMISSION_REQUEST = "permission_request"  # 权限申请指引
+    NETWORK_ISSUE = "network_issue"      # 网络连接故障
+    DEVICE_FAILURE = "device_failure"    # 设备硬件故障
+    SOFTWARE_INSTALL = "software_install"  # 软件安装/更新
     OTHER      = "other"
 
 
@@ -64,9 +69,9 @@ class IntentResult:
 
 # ── Few-shot 模板（同时用于 LLM 示例和 Embedding 匹配）────────────────────────
 _TEMPLATES: Dict[IntentCategory, List[str]] = {
-    IntentCategory.QUERY:      ["办公软件怎么安装？", "IT 支持的服务范围是什么？", "在哪里查看操作手册？"],
+    IntentCategory.QUERY:      ["IT 支持的服务范围是什么？", "在哪里查看操作手册？", "支持哪些办公系统？"],
     IntentCategory.COMPLAINT:  ["等了好几个小时！", "服务太差了！", "一直没人处理！"],
-    IntentCategory.REQUEST:    ["帮我安装办公软件", "我需要配置打印机", "请协助设置工作环境"],
+    IntentCategory.REQUEST:    ["请协助设置工作环境", "我需要配置打印机", "帮我安排入职 IT 指导"],
     IntentCategory.GREETING:   ["你好", "嗨，有人吗", "早上好"],
     IntentCategory.ESCALATION: ["我要投诉！", "转人工客服", "找你们经理"],
     IntentCategory.TECHNICAL:  ["应用一直崩溃", "无法登录", "出现500错误"],
@@ -77,6 +82,11 @@ _TEMPLATES: Dict[IntentCategory, List[str]] = {
     IntentCategory.TECHNICAL_LOGIN: ["登录一直报401", "验证码收不到", "无法登录账号"],
     IntentCategory.TECHNICAL_CRASH: ["应用一直崩溃", "页面报500错误", "系统闪退"],
     IntentCategory.HUMAN_HANDOFF: ["转人工客服", "我要找人工", "请升级处理"],
+    IntentCategory.NETWORK: ["网络方面需要帮助", "咨询网络使用规范", "想了解公司网络服务"],
+    IntentCategory.DEVICE: ["电脑设备方面需要帮助", "咨询办公设备使用规范", "设备维护有哪些注意事项"],
+    IntentCategory.NETWORK_ISSUE: ["VPN 连接超时", "公司 Wi-Fi 连不上", "内网无法访问，DNS 解析失败"],
+    IntentCategory.DEVICE_FAILURE: ["电脑无法开机", "打印机卡纸", "手机无法充电"],
+    IntentCategory.SOFTWARE_INSTALL: ["办公软件怎么安装？", "帮我安装办公软件", "应用更新失败，如何升级客户端"],
 }
 
 _SPECIFIC_INTENTS = {
@@ -85,6 +95,9 @@ _SPECIFIC_INTENTS = {
     IntentCategory.TECHNICAL_LOGIN,
     IntentCategory.TECHNICAL_CRASH,
     IntentCategory.HUMAN_HANDOFF,
+    IntentCategory.NETWORK_ISSUE,
+    IntentCategory.DEVICE_FAILURE,
+    IntentCategory.SOFTWARE_INSTALL,
 }
 
 _GENERIC_INTENTS = {
@@ -92,6 +105,8 @@ _GENERIC_INTENTS = {
     IntentCategory.TECHNICAL,
     IntentCategory.ACCOUNT,
     IntentCategory.ESCALATION,
+    IntentCategory.NETWORK,
+    IntentCategory.DEVICE,
 }
 
 _INTENT_GROUPS: Dict[IntentCategory, IntentCategory] = {
@@ -100,7 +115,46 @@ _INTENT_GROUPS: Dict[IntentCategory, IntentCategory] = {
     IntentCategory.TECHNICAL_LOGIN: IntentCategory.TECHNICAL,
     IntentCategory.TECHNICAL_CRASH: IntentCategory.TECHNICAL,
     IntentCategory.HUMAN_HANDOFF: IntentCategory.ESCALATION,
+    IntentCategory.NETWORK_ISSUE: IntentCategory.NETWORK,
+    IntentCategory.DEVICE_FAILURE: IntentCategory.DEVICE,
+    IntentCategory.SOFTWARE_INSTALL: IntentCategory.TECHNICAL,
 }
+
+# 只用明确故障/操作短语，出现 VPN、电脑等名称本身不代表故障。
+NETWORK_ISSUE_KEYWORDS = [
+    "vpn 连接超时", "vpn连接超时", "vpn 连接失败", "vpn连接失败",
+    "vpn 连不上", "vpn连不上", "vpn 无法连接", "vpn无法连接",
+    "wi-fi 连不上", "wi-fi连不上", "wifi 连不上", "wifi连不上", "无线网络连不上",
+    "网络不通", "无法上网", "内网无法访问", "内网故障", "dns 解析失败", "dns解析失败",
+    "网络断开", "网络频繁断开", "网络频繁掉线",
+    "wi-fi 无法连接", "wi-fi无法连接", "wifi 无法连接", "wifi无法连接",
+    "vpn 一直连接超时", "vpn一直连接超时", "vpn 连接一直超时", "vpn连接一直超时",
+]
+DEVICE_FAILURE_KEYWORDS = [
+    "无法开机", "不能开机", "开不了机", "打印机卡纸", "打印机 卡纸",
+    "无法充电", "不能充电", "键盘失灵", "鼠标失灵", "屏幕碎裂", "电池鼓包",
+]
+SOFTWARE_INSTALL_KEYWORDS = [
+    "安装软件", "安装办公软件", "软件安装", "安装失败", "更新软件", "软件更新",
+    "更新失败", "升级客户端", "安装客户端", "安装 vpn", "安装vpn",
+]
+
+def match_domain_keywords(message: str, keywords: List[str]) -> List[str]:
+    """新领域只匹配肯定片段，排除明确否定/假设；保留原关键词计分方式。"""
+    parts = re.split(r"[，。；;！？!?\n]|但是|而是|不过|但", message.lower())
+    matched = []
+    for keyword in keywords:
+        for part in parts:
+            for match in re.finditer(re.escape(keyword), part):
+                prefix = part[:match.start()]
+                if re.search(r"不是|并非|没有|并未|未出现|未发生|不要|如果|假如|假设|是否", prefix):
+                    continue
+                matched.append(keyword)
+                break
+            if keyword in matched:
+                break
+    return matched
+
 
 # 紧急关键词
 _URGENCY_KEYWORDS = {
@@ -236,6 +290,11 @@ class IntentRecognizer:
         prompt = f"""你是企业 IT 支持意图分析专家。根据示例判断用户意图，返回 JSON。
 如果用户问题能匹配细粒度业务意图，请优先返回细粒度意图，而不是宽泛大类。
 例如权限申请优先返回 permission_request，登录故障优先返回 technical_login。非 IT 支持问题返回 other。
+网络连接、Wi-Fi、DNS、VPN 连接超时/断开返回 network_issue；只泛泛咨询网络服务返回 network。
+电脑无法开机、打印机卡纸、设备无法充电等硬件故障返回 device_failure；泛泛咨询设备使用返回 device。
+软件安装/更新请求及安装失败返回 software_install；软件崩溃/闪退仍返回 technical_crash。
+按问题表现分类，不按设备或系统名称分类：电脑软件闪退是 technical_crash，电脑无法开机是 device_failure，电脑连不上公司 Wi-Fi 是 network_issue。
+申请 VPN 使用权限是 permission_request；已有权限但 VPN 连接超时是 network_issue；忘记密码需重置是 account_security。
 
         {ctx}
         用户消息: "{message}"
@@ -290,8 +349,11 @@ class IntentRecognizer:
             IntentCategory.HUMAN_HANDOFF: ["转人工", "人工客服", "找人工", "转 it", "找 it"],
             IntentCategory.PERMISSION_REQUEST: ["申请权限", "申请项目", "开通", "访问权限", "权限申请", "只读权限"],
             IntentCategory.ACCOUNT_SECURITY: ["被盗", "异常登录", "重置密码", "两步验证", "安全"],
+            IntentCategory.NETWORK_ISSUE: match_domain_keywords(msg, NETWORK_ISSUE_KEYWORDS),
+            IntentCategory.DEVICE_FAILURE: match_domain_keywords(msg, DEVICE_FAILURE_KEYWORDS),
             IntentCategory.TECHNICAL_LOGIN: ["无法登录", "登录失败", "401", "验证码"],
             IntentCategory.TECHNICAL_CRASH: ["崩溃", "闪退", "500", "报错", "crash"],
+            IntentCategory.SOFTWARE_INSTALL: match_domain_keywords(msg, SOFTWARE_INSTALL_KEYWORDS),
         }
         generic_patterns = {
             IntentCategory.ESCALATION: ["投诉", "经理", "supervisor"],
@@ -362,6 +424,17 @@ class IntentRecognizer:
     def _extract_entities(self, message: str) -> Dict[str, List[str]]:
         """用规则提取高价值实体，避免每次识别都额外调用 LLM。"""
         message = self._clean_text(message)
+        # 新增环境字段只从陈述片段提取；不把建议、假设或否定当成已确认环境。
+        environment_parts = []
+        for part in re.split(r"[，。；;！？!?\n]", message):
+            if re.search(r"如果|假如|假设|是否|是不是|不是|并非|未使用|没有|没用|不用|不要|建议|试试|吗", part):
+                continue
+            if re.search(r"改用|换成", part) and not re.search(
+                r"(?:已经|已|刚刚|刚)\s*(?:换成|改用)|(?:换成|改用)[^，。]+(?:了|后)", part,
+            ):
+                continue
+            environment_parts.append(part)
+        environment = "，".join(environment_parts)
         return {
             "target_system": self._unique(
                 re.findall(r"(?:目标系统|涉及系统|系统名称|应用名称)\s*[:：]\s*([^，。；;！？!?\n]+)", message)
@@ -385,6 +458,26 @@ class IntentRecognizer:
                 re.findall(r"(?:申请用途|用途)\s*[:：]\s*([^，。；;！？!?\n]+)", message)
                 + re.findall(r"(?:用于|用来)\s*([^，。；;！？!?\n]+)", message)
             ),
+            "operating_system": self._unique(re.findall(
+                r"(?<![A-Za-z0-9])(?:Windows(?:\s*(?:11|10|8(?:\.1)?|7))?|macOS(?:\s*\d+(?:\.\d+)*)?|Ubuntu(?:\s*\d+(?:\.\d+)*)?|Linux|Android(?:\s*\d+(?:\.\d+)*)?|iOS(?:\s*\d+(?:\.\d+)*)?)(?![A-Za-z0-9])",
+                environment, re.I,
+            )),
+            "client_version": self._unique(re.findall(
+                r"(?:客户端版本|软件版本|应用版本)\s*[:：为是]?\s*([vV]?\d+(?:\.[A-Za-z0-9]+)+(?:[-_][A-Za-z0-9.]+)?)",
+                environment,
+            )),
+            "network_type": self._unique(re.findall(
+                r"公司\s*(?:Wi-Fi|WiFi)|家庭\s*(?:Wi-Fi|WiFi)|有线网络|手机热点|无线网络",
+                environment, re.I,
+            )),
+            "impact_scope": self._unique(re.findall(
+                r"仅本人|只有我一个人|只有我|同部门多人|多个同事|多名同事|全公司|整个部门",
+                environment,
+            )),
+            "device_type": self._unique(re.findall(r"笔记本|台式机|电脑|手机(?!\s*热点)|打印机", environment)),
+            "device_model": self._unique(re.findall(
+                r"(?:设备型号|电脑型号|打印机型号|手机型号)\s*[:：]\s*([^，。；;！？!?\n]+)", environment,
+            )),
         }
 
     # ── 辅助 ──────────────────────────────────────────────────────────────────
