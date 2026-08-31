@@ -74,6 +74,8 @@ async def lifespan(app: FastAPI):
     from core.intent_recognizer import IntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
     from mcp.knowledge_base import KnowledgeBase
+    from mcp.elasticsearch_store import ElasticsearchStore
+    from mcp.reranker import HTTPReranker
     from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
     from monitor.performance_monitor import PerformanceMonitor
@@ -122,11 +124,26 @@ async def lifespan(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
     )
+    keyword_store = ElasticsearchStore(
+        url=os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200"),
+        index_name=os.getenv("ELASTICSEARCH_INDEX", "nexo_knowledge"),
+    )
+    reranker = HTTPReranker(
+        url=os.getenv("RERANK_URL", ""),
+        api_key=os.getenv("RERANK_API_KEY") or None,
+        model=os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
+        timeout_s=float(os.getenv("RERANK_TIMEOUT_SECONDS", "8")),
+    )
     kb = KnowledgeBase(
+        keyword_store=keyword_store,
         chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
         chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
         chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
     )
+    try:
+        await kb.initialize_keyword_index()
+    except Exception as ex:
+        logger.warning("关键词索引初始化未完成，将保留向量通道: %s", type(ex).__name__)
     logger.info(f"知识库已加载: {await kb.doc_count_async()} 个文档片段")
 
     def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
@@ -155,6 +172,24 @@ async def lifespan(app: FastAPI):
         supports_rerank=True,
         fallback=knowledge_fallback,
     ))
+    _tool_manager.register(Tool(
+        name="keyword_search",
+        description="搜索知识库（Elasticsearch BM25）",
+        handler=kb.keyword_search_handler,
+        schema={"type": "object", "properties": {
+            "query": {"type": "string"}, "top_k": {"type": "integer"}},
+            "required": ["query"]},
+        cache_ttl=300.0,
+    ))
+    _tool_manager.set_rag_components(
+        keyword_tool_name="keyword_search", reranker=reranker,
+        neighbor_loader=kb.get_neighbors_async,
+        candidate_k=int(os.getenv("RAG_CANDIDATE_K", "20")),
+        rrf_k=int(os.getenv("RAG_RRF_K", "60")),
+        neighbor_window=int(os.getenv("RAG_NEIGHBOR_WINDOW", "1")),
+        max_expansion_seeds=int(os.getenv("RAG_EXPANSION_SEEDS", "3")),
+        evidence_max_chars=int(os.getenv("RAG_EVIDENCE_MAX_CHARS", "8000")),
+    )
     if _orchestrator is not None:
         _orchestrator.set_shared_tools(build_shared_rag_tools(_tool_manager))
 
@@ -183,6 +218,8 @@ async def lifespan(app: FastAPI):
     yield
 
     await _monitor.stop()
+    await keyword_store.close()
+    await reranker.close()
     if _memory is not None:
         await _memory.close()
     logger.info("Nexo 已关闭")
@@ -384,13 +421,18 @@ async def search(query: str, top_k: int = 5):
     if _tool_manager is None:
         raise HTTPException(503, "服务未就绪")
     result = await _tool_manager.search_with_rewrite("knowledge_search", query, top_k=top_k)
-    return {"query": query, "results": result.data, "reranked": result.reranked}
+    return {"query": query, "success": result.success, "error": result.error,
+            "results": result.data, "reranked": result.reranked,
+            "retrieval": result.retrieval}
 
 
 class DocInput(BaseModel):
     """单篇文档输入。"""
     title:   str
     content: str
+    doc_id: Optional[str] = None
+    source: str = ""
+    section: str = ""
 
 
 class BatchDocInput(BaseModel):
@@ -440,7 +482,11 @@ async def add_knowledge(body: BatchDocInput):
     if tool is None:
         raise HTTPException(503, "知识库未初始化")
     kb = tool.handler.__self__
-    count = await kb.add_documents_async([{"title": d.title, "content": d.content} for d in body.documents])
+    try:
+        count = await kb.add_documents_async([d.model_dump(exclude_none=True) for d in body.documents])
+    finally:
+        # 失败也可能已有部分文档完成发布，不能继续使用旧检索缓存。
+        _tool_manager.invalidate_rag_cache()
     total = await kb.doc_count_async()
     return {"message": f"成功导入 {count} 个文档片段", "added_chunks": count, "total_chunks": total}
 
@@ -481,7 +527,11 @@ async def upload_knowledge(file: UploadFile = File(...)):
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
         docs = [{"title": title, "content": text}]
 
-    count = await kb.add_documents_async(docs)
+    try:
+        count = await kb.add_documents_async(docs)
+    finally:
+        # 失败也可能已有部分文档完成发布，不能继续使用旧检索缓存。
+        _tool_manager.invalidate_rag_cache()
     total = await kb.doc_count_async()
     return {
         "message": f"文件 {filename} 导入成功",

@@ -66,6 +66,15 @@
                       <span>{{ call.success ? '成功' : '失败' }}</span>
                     </summary>
                     <pre>{{ formatJson(call.input || {}) }}</pre>
+                    <small v-if="call.retrieval?.degraded">部分检索能力暂不可用，已使用可用资料。</small>
+                    <small v-if="call.tool_name === 'search_knowledge_base' && call.result_success === false">本次未获取到可用资料。</small>
+                    <details v-if="call.retrieval?.evidence?.length">
+                      <summary>参考资料（{{ call.retrieval.evidence.length }} 段）</summary>
+                      <div v-for="source in call.retrieval.evidence" :key="source.chunk_id">
+                        <strong>{{ source.title }}</strong>
+                        <p>{{ source.content }}</p>
+                      </div>
+                    </details>
                   </details>
                 </div>
                 <div v-else class="trace-empty-block">

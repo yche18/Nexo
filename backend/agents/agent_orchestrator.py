@@ -342,9 +342,17 @@ class BaseAgent:
                             "latency_ms": round(tool_latency_ms, 1),
                             "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
                             "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
+                            "retrieval": result.get("retrieval", {}) if isinstance(result, dict) else {},
                             "error": error_text,
                         }
                     )
+                    # 完整证据已在 results 中；trace 保留证据，模型只接收一份。
+                    if isinstance(result, dict) and result.get("retrieval"):
+                        result = dict(result)
+                        result["retrieval"] = {
+                            key: value for key, value in result["retrieval"].items()
+                            if key != "evidence"
+                        }
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
