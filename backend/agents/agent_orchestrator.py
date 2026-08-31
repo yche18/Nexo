@@ -39,7 +39,11 @@ from agents.tools import (
     general_tools,
     technical_tools,
 )
-from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
+from core.intent_recognizer import (
+    IntentCategory, IntentRecognizer, UrgencyLevel,
+    NETWORK_ISSUE_KEYWORDS, DEVICE_FAILURE_KEYWORDS, SOFTWARE_INSTALL_KEYWORDS,
+    match_domain_keywords,
+)
 from core.llm_utils import extract_text_content, thinking_request_kwargs
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,8 @@ logger = logging.getLogger(__name__)
 class AgentType(Enum):
     GENERAL   = "general"    # 通用客服
     TECHNICAL = "technical"  # 技术支持
+    NETWORK   = "network"    # 网络连接与 VPN 故障
+    DEVICE    = "device"     # 设备硬件故障
     ACCESS    = "access"     # 账号与权限申请指引
     ESCALATION = "escalation" # 人工升级与交接
 
@@ -315,7 +321,9 @@ class BaseAgent:
             f"允许的数据/工具范围：{'、'.join(self.profile.tool_scope) or '仅使用当前请求上下文'}\n"
             "不要声称执行了未提供的查询、修改或授权操作；缺少证据时明确说明需要核验。\n"
             "[IT 支持实体] target_system=目标系统，issue_description=问题现象，date=发生时间，"
-            "error_code=错误码，requested_access=申请权限，purpose=申请用途。"
+            "error_code=错误码，requested_access=申请权限，purpose=申请用途，"
+            "operating_system=操作系统，client_version=客户端版本，network_type=网络环境，"
+            "impact_scope=影响范围，device_type=设备类型，device_model=设备型号。"
             "实体仅由本轮消息的规则匹配得到，空值表示未提取到，不代表用户没有该信息；结合原文和已有上下文理解。"
         )
         base_prompt = f"{self.system_prompt}{profile_prompt}"
@@ -364,7 +372,7 @@ class GeneralAgent(BaseAgent):
 
     def _build_role_packet(self, req: Request) -> str:
         packet = json.loads(super()._build_role_packet(req))
-        packet["triage_targets"] = ["technical", "access", "escalation"]
+        packet["triage_targets"] = ["technical", "access", "network", "device", "escalation"]
         packet["response_mode"] = "answer_or_clarify"
         return json.dumps(packet, ensure_ascii=False)
 
@@ -388,7 +396,7 @@ class TechnicalAgent(BaseAgent):
         max_tokens=1200,
     )
     system_prompt = (
-        "你是 Nexo 的 IT 技术支持专家。专注于 VPN、登录、网络和办公软件的故障排查、错误诊断与配置指引。"
+        "你是 Nexo 的 IT 技术支持专家。专注于办公软件安装更新、登录、应用崩溃和通用技术问题的故障排查、错误诊断与配置指引。明确的网络连接故障由 Network 支持，设备硬件故障由 Device 支持。"
         "提供清晰的步骤化解决方案。遇到需要后台操作的问题，说明需要升级处理。"
     )
 
@@ -405,6 +413,51 @@ class TechnicalAgent(BaseAgent):
         tools = super().get_tools()
         tools.update(technical_tools())
         return tools
+
+
+class NetworkAgent(TechnicalAgent):
+    agent_type = AgentType.NETWORK
+    profile = AgentProfile(
+        role="网络连接与 VPN 故障排查",
+        mission="区分本机、网络环境和服务端问题，按知识库 SOP 给出低风险且可验证的连接排查步骤。",
+        workflow=("确认连接现象", "确认网络环境和影响范围", "查阅适用 SOP", "按已有排查结果继续", "验证或交接"),
+        input_contract=("目标系统", "问题现象", "错误码", "操作系统", "客户端版本", "网络环境", "影响范围", "知识库上下文"),
+        output_contract=("问题判断", "适用 SOP 的必要步骤", "验证方式", "尚缺信息", "升级条件"),
+        handoff_conditions=("多名员工持续无法连接", "需要网络管理员操作", "完成适用排查后仍未恢复"),
+        tool_scope=("search_knowledge_base", "lookup_error_code", "build_diagnostic_plan"),
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    system_prompt = (
+        "你是 Nexo 的网络支持专家，负责 Wi-Fi、有线网络、DNS 和 VPN 连接故障。"
+        "先查询知识库，找到适用 SOP 后保留必要步骤，不再调用通用诊断工具生成另一套流程。"
+        "结合用户已执行的操作继续排查，不把未执行的建议记作完成。"
+        "申请 VPN 使用权限属于 Access；软件崩溃属于 Technical；硬件损坏属于 Device。"
+        "没有实际网络探测或后台管理工具，不声称已测试连接、修改配置或创建工单。"
+    )
+
+
+class DeviceAgent(BaseAgent):
+    agent_type = AgentType.DEVICE
+    profile = AgentProfile(
+        role="办公设备故障排查",
+        mission="根据设备类型、型号和故障现象查阅设备 SOP，先区分软硬件与连接原因，再提供低风险检查与人工维修交接指引。",
+        workflow=("确认设备和现象", "检查安全风险", "查阅适用 SOP", "给出外部可操作检查", "验证或交接"),
+        input_contract=("设备类型", "设备型号", "问题现象", "发生时间", "影响范围", "知识库上下文"),
+        output_contract=("现象确认", "必要检查步骤", "验证方式", "需补充信息", "维修交接边界"),
+        handoff_conditions=("冒烟、异味、电池鼓包或漏电", "需要拆机或更换部件", "适用检查后仍未恢复"),
+        tool_scope=("search_knowledge_base",),
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    system_prompt = (
+        "你是 Nexo 的办公设备支持专家，负责电脑、手机和打印机等设备的故障初诊与硬件排查。"
+        "原因尚不明确的设备异常先区分软硬件与连接问题，不预设硬件损坏。"
+        "先查询知识库，按适用设备 SOP 回答，信息不足时只询问本轮必要字段。"
+        "不要把软件网络通用诊断流程套用到硬件故障；已明确的应用安装和崩溃由 Technical 处理，已明确的网络连接故障由 Network 处理。"
+        "只提供安全的外部检查，不要求拆机、带电维修或反复强制启动。"
+        "没有资产查询、远程控制和报修工具，不声称已检查设备或安排维修。"
+    )
 
 
 class AccessAgent(BaseAgent):
@@ -424,7 +477,7 @@ class AccessAgent(BaseAgent):
         "你是 Nexo 的账号与权限支持专家，负责企业账号咨询与权限申请指引。"
         "按知识库说明流程；使用 check_access_fields 检查已提取的目标系统与用途，按缺失字段补问。"
         "你未接入身份、审批或权限系统，不得声称已查询权限、提交申请、完成审批或开通账号。"
-        "登录和网络故障由技术支持排查；需要实际操作时建议转人工（IT 支持），不索要密码和验证码。"
+        "登录故障由 Technical 排查，网络连接故障由 Network 排查；需要实际操作时建议转人工（IT 支持），不索要密码和验证码。"
     )
 
     def _build_role_packet(self, req: Request) -> str:
@@ -503,6 +556,12 @@ class EscalationAgent(BaseAgent):
             "error_code": "错误码",
             "requested_access": "申请权限",
             "purpose": "申请用途",
+            "operating_system": "操作系统",
+            "client_version": "客户端版本",
+            "network_type": "网络环境",
+            "impact_scope": "影响范围",
+            "device_type": "设备类型",
+            "device_model": "设备型号",
         }
         # 仅整理交接展示字段，不修改 req.entities 或全局实体提取规则。
         aliases = {
@@ -512,7 +571,21 @@ class EscalationAgent(BaseAgent):
             "error_code": ("错误码", "状态码"),
             "requested_access": ("申请权限", "期望权限", "所需权限", "权限类型", "权限"),
             "purpose": ("申请用途", "用途"),
+            "operating_system": ("操作系统", "系统版本"),
+            "client_version": ("客户端版本", "软件版本"),
+            "network_type": ("网络环境", "网络类型"),
+            "impact_scope": ("影响范围",),
+            "device_type": ("设备类型",),
+            "device_model": ("设备型号", "电脑型号", "打印机型号"),
         }
+        new_fields = ("operating_system", "client_version", "network_type",
+                      "impact_scope", "device_type", "device_model")
+        user_sources = [message.get("content") or "" for message in req.history or []
+                        if message.get("role") == "user"]
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state.get("new_topic"):
+            user_sources = []
+        user_sources.append(req.message)
         context = req.context or ""
         sources = []
         if context.startswith("[会话摘要]\n"):
@@ -546,6 +619,8 @@ class EscalationAgent(BaseAgent):
             for line in re.split(r"[\n；;]", text):
                 line = re.sub(r"^\s*(?:[-*>]+|\d+[.)、])\s*", "", line).strip()
                 for key, names in aliases.items():
+                    if key in new_fields and source not in user_sources:
+                        continue
                     labels = "|".join(re.escape(name) for name in names)
                     # 已确认的 Markdown 表格、字段列表及显式更正，后出现的值优先。
                     match = re.match(rf"^\|\s*(?:{labels})\s*\|\s*([^|]+)\|", line)
@@ -570,12 +645,29 @@ class EscalationAgent(BaseAgent):
             codes = re.findall(r"(?:错误码|状态码|报错?|HTTP)\s*[:：#]?\s*([45]\d{2})\b", text, re.I)
             if codes:
                 fields["error_code"] = "、".join(dict.fromkeys(codes))
+        # 新领域字段仅从用户原话提取，复用同一套规则，不把助手建议当成环境事实。
+        recognizer = IntentRecognizer.__new__(IntentRecognizer)
+        for source in user_sources:
+            extracted = recognizer._extract_entities(source)
+            for key in new_fields:
+                if extracted.get(key):
+                    fields[key] = "、".join(extracted[key])[:120]
+            issues = match_domain_keywords(source, NETWORK_ISSUE_KEYWORDS + DEVICE_FAILURE_KEYWORDS)
+            if issues:
+                existing = re.split(r"[，、]", fields.get("issue_description", ""))
+                issues = list(dict.fromkeys(item for item in existing + issues if item))
+                fields["issue_description"] = "，".join(issues)[:120]
         from harness.context import harness_mode
+        blocked_new_fields = set()
         if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
             # 未确认候选不能通过旧助手回复或摘要重新成为交接事实。
             for candidate in req.case_state.get("candidates", []):
                 fields.pop(candidate.get("field"), None)
+                if candidate.get("field") in new_fields:
+                    blocked_new_fields.add(candidate["field"])
         for key in entity_labels:
+            if key in blocked_new_fields:
+                continue
             if (req.entities or {}).get(key):
                 fields[key] = "、".join(req.entities[key])[:120]
 
@@ -695,6 +787,11 @@ class AgentOrchestrator:
         IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
         IntentCategory.TECHNICAL_LOGIN: AgentType.TECHNICAL,
         IntentCategory.TECHNICAL_CRASH: AgentType.TECHNICAL,
+        IntentCategory.SOFTWARE_INSTALL: AgentType.TECHNICAL,
+        IntentCategory.NETWORK: AgentType.NETWORK,
+        IntentCategory.NETWORK_ISSUE: AgentType.NETWORK,
+        IntentCategory.DEVICE: AgentType.DEVICE,
+        IntentCategory.DEVICE_FAILURE: AgentType.DEVICE,
         IntentCategory.ACCOUNT:    AgentType.ACCESS,
         IntentCategory.ACCOUNT_SECURITY: AgentType.ACCESS,
         IntentCategory.PERMISSION_REQUEST: AgentType.ACCESS,
@@ -731,6 +828,8 @@ class AgentOrchestrator:
             AgentType.GENERAL: [self._make_agent(GeneralAgent, client, model, skill_manager)],
             AgentType.TECHNICAL: [self._make_agent(TechnicalAgent, client, model, skill_manager)],
             AgentType.ACCESS: [self._make_agent(AccessAgent, client, model, skill_manager)],
+            AgentType.NETWORK: [self._make_agent(NetworkAgent, client, model, skill_manager)],
+            AgentType.DEVICE: [self._make_agent(DeviceAgent, client, model, skill_manager)],
             AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager)],
         }
         self.set_shared_tools(build_shared_rag_tools(rag_tool_manager))
@@ -1053,7 +1152,7 @@ class AgentOrchestrator:
         scores = self._domain_scores(req)
         degraded_agents = {
             agent_type
-            for agent_type in (AgentType.TECHNICAL, AgentType.ACCESS)
+            for agent_type in (AgentType.TECHNICAL, AgentType.ACCESS, AgentType.NETWORK, AgentType.DEVICE)
             if scores.get(agent_type, 0.0) > 0 and self._monitor_degraded(agent_type)
         }
         available_scores = {
@@ -1099,6 +1198,23 @@ class AgentOrchestrator:
             confidence=round(min(primary_score, 1.0), 3),
         )
 
+    @staticmethod
+    def _technical_keywords(req: Request, include_verification: bool = False) -> List[str]:
+        """明确网络/设备故障时，通用报错和连接词不再重复触发技术协作。"""
+        msg = req.message.lower()
+        specialised = req.intent in (
+            IntentCategory.NETWORK, IntentCategory.NETWORK_ISSUE,
+            IntentCategory.DEVICE, IntentCategory.DEVICE_FAILURE,
+        ) or bool(match_domain_keywords(msg, NETWORK_ISSUE_KEYWORDS + DEVICE_FAILURE_KEYWORDS))
+        if specialised:
+            keywords = ["崩溃", "闪退", "crash", "应用报错", "页面报错", "接口报错", "软件报错",
+                        "无法登录", "登录失败", "401", "验证码"]
+        else:
+            keywords = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "连不上", "连接失败"]
+        if include_verification and not specialised:
+            keywords.append("验证码")
+        return keywords + match_domain_keywords(msg, SOFTWARE_INSTALL_KEYWORDS)
+
     def _domain_scores(self, req: Request) -> Dict[AgentType, float]:
         """按意图、关键词和实体为各领域 Agent 打分。"""
         msg = req.message.lower()
@@ -1106,6 +1222,8 @@ class AgentOrchestrator:
             AgentType.GENERAL: 0.1,
             AgentType.TECHNICAL: 0.0,
             AgentType.ACCESS: 0.0,
+            AgentType.NETWORK: 0.0,
+            AgentType.DEVICE: 0.0,
         }
 
         if req.intent in (
@@ -1122,6 +1240,7 @@ class AgentOrchestrator:
             IntentCategory.TECHNICAL,
             IntentCategory.TECHNICAL_LOGIN,
             IntentCategory.TECHNICAL_CRASH,
+            IntentCategory.SOFTWARE_INSTALL,
         ):
             scores[AgentType.TECHNICAL] += 0.75
 
@@ -1132,7 +1251,7 @@ class AgentOrchestrator:
         ):
             scores[AgentType.ACCESS] += 0.75
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "验证码", "连不上", "连接失败"]
+        technical_kws = self._technical_keywords(req, include_verification=True)
         access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "permission", "只读权限"]
         general_kws = ["安装", "办公软件", "打印机", "操作手册", "咨询", "帮助"]
 
@@ -1143,6 +1262,15 @@ class AgentOrchestrator:
         scores[AgentType.TECHNICAL] += min(0.45, technical_hits * 0.18)
         scores[AgentType.ACCESS] += min(0.45, access_hits * 0.18)
         scores[AgentType.GENERAL] += min(0.35, general_hits * 0.12)
+
+        if req.intent in (IntentCategory.NETWORK, IntentCategory.NETWORK_ISSUE):
+            scores[AgentType.NETWORK] += 0.75
+        if req.intent in (IntentCategory.DEVICE, IntentCategory.DEVICE_FAILURE):
+            scores[AgentType.DEVICE] += 0.75
+        network_hits = len(match_domain_keywords(msg, NETWORK_ISSUE_KEYWORDS))
+        device_hits = len(match_domain_keywords(msg, DEVICE_FAILURE_KEYWORDS))
+        scores[AgentType.NETWORK] += min(0.45, network_hits * 0.18)
+        scores[AgentType.DEVICE] += min(0.45, device_hits * 0.18)
 
         entities = req.entities or {}
         if entities.get("error_code"):
@@ -1182,13 +1310,14 @@ class AgentOrchestrator:
         msg = req.message.lower()
         targets: List[AgentType] = []
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "连不上", "连接失败"]
+        technical_kws = self._technical_keywords(req)
         access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "permission", "只读权限"]
 
         if req.intent in (
             IntentCategory.TECHNICAL,
             IntentCategory.TECHNICAL_LOGIN,
             IntentCategory.TECHNICAL_CRASH,
+            IntentCategory.SOFTWARE_INSTALL,
         ) or any(kw in msg for kw in technical_kws):
             targets.append(AgentType.TECHNICAL)
         if req.intent in (
@@ -1197,6 +1326,15 @@ class AgentOrchestrator:
             IntentCategory.PERMISSION_REQUEST,
         ) or any(kw in msg for kw in access_kws):
             targets.append(AgentType.ACCESS)
+
+        if req.intent in (IntentCategory.NETWORK, IntentCategory.NETWORK_ISSUE) or match_domain_keywords(
+            msg, NETWORK_ISSUE_KEYWORDS
+        ):
+            targets.append(AgentType.NETWORK)
+        if req.intent in (IntentCategory.DEVICE, IntentCategory.DEVICE_FAILURE) or match_domain_keywords(
+            msg, DEVICE_FAILURE_KEYWORDS
+        ):
+            targets.append(AgentType.DEVICE)
 
         # 保持顺序去重，并只返回当前有实例的 Agent 类型。
         deduped = list(dict.fromkeys(targets))

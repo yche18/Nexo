@@ -328,6 +328,8 @@ def test_three_entity_bonuses_match_original_weights_and_only_apply_once():
         AgentType.GENERAL: round(baseline[AgentType.GENERAL] + 0.1, 3),
         AgentType.TECHNICAL: round(baseline[AgentType.TECHNICAL] + 0.2, 3),
         AgentType.ACCESS: round(baseline[AgentType.ACCESS] + 0.15, 3),
+        AgentType.NETWORK: 0.0,
+        AgentType.DEVICE: 0.0,
     }
 
 
