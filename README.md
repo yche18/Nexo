@@ -19,9 +19,13 @@
 | 角色 | 职责 |
 | --- | --- |
 | GeneralAgent | IT 咨询、软件使用指引与需求澄清 |
-| TechnicalAgent | 登录、网络与办公软件故障排查 |
+| TechnicalAgent | 登录、办公软件安装更新与应用故障排查 |
+| NetworkAgent | Wi-Fi、DNS、内网与 VPN 连接故障排查 |
+| DeviceAgent | 电脑、手机、打印机等设备故障初诊 |
 | AccessAgent | 账号与权限申请指引、申请信息完整性检查 |
 | EscalationAgent | 整理已知信息，提供人工交接说明 |
+
+新增领域、实体和验证边界见 [Agent 扩展说明](backend/evaluation/DOMAIN_AGENTS.md)。
 
 权限信息检查只核对目标系统和申请用途是否齐全。项目当前不连接身份、审批或工单系统，不执行授权、账号修改或工单创建。内置知识库为演示用 IT SOP。
 

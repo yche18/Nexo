@@ -1,0 +1,191 @@
+{
+  "version": "domain-agents-v1",
+  "origin": "Synthetic development acceptance cases; criteria frozen before the first live run; not a production accuracy benchmark.",
+  "baseline_revision": "095d167",
+  "legacy_dataset": "support_v1.json",
+  "legacy_label_migrations": [
+    {
+      "id": "i06",
+      "old": "request",
+      "new": "software_install",
+      "reason": "Explicit software installation now has its own intent."
+    },
+    {
+      "id": "i49",
+      "old": "technical",
+      "new": "network_issue",
+      "reason": "Intranet connection faults move to Network."
+    },
+    {
+      "id": "i51",
+      "old": "technical",
+      "new": "device_failure",
+      "reason": "Printer failure initially goes to Device for device-level triage; no claim that hardware root cause is known."
+    },
+    {
+      "id": "i52",
+      "old": "technical",
+      "new": "device_failure",
+      "reason": "Microphone malfunction initially goes to Device for device-level triage."
+    }
+  ],
+  "cases": [
+    {
+      "id": "n01",
+      "name": "VPN follow-up",
+      "turns": [
+        {
+          "message": "我在 Windows 11 上使用 VPN，提示连接超时，网页正常。",
+          "agent_in": [
+            "network"
+          ]
+        },
+        {
+          "message": "我已经换过网络，也重新登录了，还是超时，下一步怎么办？",
+          "agent_in": [
+            "network"
+          ]
+        }
+      ],
+      "review_points": [
+        "按已检索的 VPN SOP 给出适用步骤",
+        "承接换网及重新登录仍超时，不把原因直接排除",
+        "不得无故转人工或宣称已修复"
+      ]
+    },
+    {
+      "id": "n02",
+      "name": "Wi-Fi environment",
+      "turns": [
+        {
+          "message": "Windows 11，公司 Wi-Fi 连不上，只有我一个人遇到这个问题，怎么排查？",
+          "agent_in": [
+            "network"
+          ]
+        }
+      ],
+      "review_points": [
+        "保留操作系统、网络环境及影响范围",
+        "先区分单机和公共网络问题，不要求关闭公司安全防护"
+      ]
+    },
+    {
+      "id": "n03",
+      "name": "VPN permission boundary",
+      "turns": [
+        {
+          "message": "我要申请 VPN 的只读权限，用于访问公司内网，请告诉我需要哪些材料。",
+          "agent_in": [
+            "access"
+          ]
+        }
+      ],
+      "review_points": [
+        "权限流程而非网络故障排查",
+        "不得声称已经授权或提交申请"
+      ]
+    },
+    {
+      "id": "n04",
+      "name": "Printer and handoff",
+      "turns": [
+        {
+          "message": "打印机卡纸，设备型号：HP M227，只有我一个人受影响，怎么办？",
+          "agent_in": [
+            "device"
+          ]
+        },
+        {
+          "message": "请转人工，并带上刚才的设备信息。",
+          "agent_in": [
+            "escalation"
+          ],
+          "fields": {
+            "设备型号": [
+              "HP M227"
+            ],
+            "设备类型": [
+              "打印机"
+            ]
+          }
+        }
+      ],
+      "review_points": [
+        "先查设备 SOP，停止重复打印，按说明安全取纸，不强拉或自行拆机",
+        "交接保留型号和问题，不粘贴全段历史",
+        "不声称已通知人工"
+      ]
+    },
+    {
+      "id": "n05",
+      "name": "Device power",
+      "turns": [
+        {
+          "message": "我的笔记本无法开机，插上电源也没有指示灯，应该如何检查？",
+          "agent_in": [
+            "device"
+          ]
+        }
+      ],
+      "review_points": [
+        "检查安全风险、电源和适配器",
+        "不得建议拆电池或带电拆机",
+        "不要套用 DNS/请求ID 软件诊断步骤"
+      ]
+    },
+    {
+      "id": "n06",
+      "name": "Software installation",
+      "turns": [
+        {
+          "message": "我想在 Windows 11 上安装公司的办公客户端，应该怎么做？",
+          "agent_in": [
+            "technical"
+          ]
+        }
+      ],
+      "review_points": [
+        "由 Technical 引导官方或公司批准的软件渠道与安装流程",
+        "不虚构代装能力"
+      ]
+    },
+    {
+      "id": "n07",
+      "name": "Crash after update",
+      "turns": [
+        {
+          "message": "软件更新后反复 crash，每次启动几秒就退出。",
+          "agent_in": [
+            "technical"
+          ]
+        }
+      ],
+      "review_points": [
+        "按崩溃现象处理，不把更新背景误认为单纯安装需求",
+        "保留现有 Technical 排障能力"
+      ]
+    },
+    {
+      "id": "n08",
+      "name": "Network plus permission",
+      "turns": [
+        {
+          "message": "我的 VPN 连接超时，同时需要申请 GitLab 的只读权限，用于查看代码，请帮我分别处理。",
+          "agent_in": [
+            "network",
+            "access"
+          ],
+          "agents_include": [
+            "network",
+            "access"
+          ]
+        }
+      ],
+      "review_points": [
+        "网络与权限两个需求均得到处理",
+        "不因出现 VPN 名称重复触发 Technical",
+        "不虚构授权或通知人工"
+      ]
+    }
+  ]
+}
