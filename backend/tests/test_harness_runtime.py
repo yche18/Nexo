@@ -95,9 +95,9 @@ def test_tool_budget_blocks_excess_calls_without_executing_them(monkeypatch):
     assert any(e.get('reason') == 'tool_budget_exhausted' for e in result.harness_events)
 
 
-def test_three_model_round_limit_keeps_failure_trace():
+def test_observe_three_model_round_limit_keeps_failure_trace():
     client = Client([tool('lookup_error_code', {'error_code': '401'})] * 3)
-    result = asyncio.run(TechnicalAgent(client, 'test').handle(request('enforce')))
+    result = asyncio.run(TechnicalAgent(client, 'test').handle(request('observe')))
     assert not result.success
     assert len(client.calls) == 3
     assert len(result.tool_traces) == 3

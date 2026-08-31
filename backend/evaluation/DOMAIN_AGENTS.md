@@ -1,5 +1,8 @@
 # IT domain Agent expansion
 
+The first-run findings below are preserved. Subsequent minimal fixes and the
+fixed-scope rerun are documented in [runtime fix results](DOMAIN_RUNTIME_FIX_RESULTS.md).
+
 ## Scope
 
 Nexo now has General, Technical, Access, Network, Device and Escalation roles.

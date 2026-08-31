@@ -239,14 +239,11 @@ class BaseAgent:
 
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
-        self.stats.total += 1
         try:
             call_result = await self._call_llm(req)
             ms = (time.monotonic() - t0) * 1000
-            self.stats.success += 1
-            self.stats.total_ms += ms
             escalate = self._needs_escalation(call_result.content)
-            return AgentResponse(
+            response = AgentResponse(
                 agent_type=self.agent_type,
                 content=call_result.content,
                 success=True,
@@ -257,8 +254,14 @@ class BaseAgent:
                 harness_events=call_result.harness_events,
                 state_updates=call_result.state_updates,
             )
+            # 只统计已完成请求，避免 Monitor 把正在执行的请求当成失败。
+            self.stats.total += 1
+            self.stats.success += 1
+            self.stats.total_ms += ms
+            return response
         except Exception as ex:
             ms = (time.monotonic() - t0) * 1000
+            self.stats.total += 1
             self.stats.total_ms += ms
             logger.error(f"{self.agent_type.value} 处理失败: {ex}")
             tools_used = ex.tools_used if isinstance(ex, AgentCallError) else []
