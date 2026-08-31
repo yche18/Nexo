@@ -12,6 +12,7 @@
 - **会话记忆**：使用 Redis 管理工作记忆，使用 ChromaDB 存储情景记忆和用户画像。
 - **业务 Skills**：按角色和关键词加载 IT 支持规范，支持运行时重新加载。
 - **监控与评测**：提供 Agent 运行指标、工具调用记录，以及意图和对话评测入口。
+- **Agent Harness**：统一模型与工具执行、独立任务状态和执行记录；可选启用工具预算、VPN SOP 回答核验及有限修正。
 
 ## Agent 角色
 
@@ -95,6 +96,18 @@ docker compose logs -f backend
 docker compose stop
 ```
 
+## Agent Harness
+
+默认 `NEXO_HARNESS_MODE=observe`，只增加执行记录，不额外调用模型或改写回答。
+切换为 `enforce` 后启用任务进度保存、工具预算和适用 VPN SOP 的回答核验；
+核验最多增加一次检查、一次修正和一次复查。`off` 关闭新增处理。
+修改 `.env` 后重新创建后端容器即可生效。
+
+任务状态与聊天摘要分开保存，区分用户反馈、建议步骤和待核验信息。
+当前提供的是会话轮次之间的状态延续，不是真实工单处理或任意执行位置的断点恢复。
+工作台的执行记录区域可查看状态与核验结果；范围、评测方法及限制见
+[Harness 说明](backend/evaluation/HARNESS.md)。
+
 ## 使用示例
 
 - 办公软件应该怎么安装？
@@ -113,6 +126,7 @@ backend/
   agents/       Agent 角色、路由编排与工具
   mcp/          检索工具管理与知识库
   memory/       会话记忆与用户画像
+  harness/      执行循环、任务状态与结果核验
   monitor/      运行指标与告警
   evaluation/   意图与对话评测
   api/          FastAPI 入口

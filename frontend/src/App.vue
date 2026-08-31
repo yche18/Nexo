@@ -181,6 +181,15 @@
                   <div><dt>知识库</dt><dd :class="lastResponse.knowledgeUsed ? 'success' : 'muted'">{{ lastResponse.knowledgeUsed ? '已使用' : '未使用' }}</dd></div>
                   <div><dt>转人工</dt><dd :class="lastResponse.escalated ? 'danger' : 'muted'">{{ lastResponse.escalated ? '是' : '否' }}</dd></div>
                 </dl>
+                <dl v-if="lastTrace?.trace?.validation || lastTrace?.trace?.case_state?.status" class="detail-list">
+                  <div v-if="lastTrace.trace.case_state?.status"><dt>处理状态</dt><dd>{{ lastTrace.trace.case_state.status }}</dd></div>
+                  <div v-if="lastTrace.trace.validation?.status"><dt>回答检查</dt><dd>{{ lastTrace.trace.validation.status }}</dd></div>
+                  <div v-if="lastTrace.trace.validation?.repair_count"><dt>纠正次数</dt><dd>{{ lastTrace.trace.validation.repair_count }}</dd></div>
+                </dl>
+                <details v-if="lastTrace?.trace?.harness_events?.length" class="trace-call-list">
+                  <summary>执行记录</summary>
+                  <pre>{{ formatJson(lastTrace.trace.harness_events) }}</pre>
+                </details>
                 <p v-if="lastResponse.routingReason" class="routing-reason">{{ lastResponse.routingReason }}</p>
                 <div v-if="lastTrace?.trace" class="trace-call-list">
                   <div class="trace-call-title">工具调用</div>
