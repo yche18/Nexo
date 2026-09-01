@@ -33,6 +33,9 @@ from anthropic import AsyncAnthropic
 
 from agents.tools import (
     AgentToolSpec,
+    create_ticket,
+    get_ticket,
+    parse_ticket_action,
     build_shared_rag_tools,
     access_tools,
     device_tools,
@@ -835,6 +838,7 @@ class AgentOrchestrator:
         model:    str = "claude-3-5-sonnet-20241022",
         skill_manager: Optional[Any] = None,
         rag_tool_manager: Optional[Any] = None,
+        ticket_store: Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -843,6 +847,7 @@ class AgentOrchestrator:
 
         self._intent_recognizer = IntentRecognizer(api_key=api_key, base_url=base_url, model=model)
         self._skill_manager = skill_manager
+        self._ticket_store = ticket_store
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}
         self._recent_tool_traces = deque(maxlen=_env_int("NEXO_TOOL_TRACE_MAX", 200))
@@ -935,6 +940,10 @@ class AgentOrchestrator:
           意图识别 → 路由选 Agent → 执行 → 检查升级 → 返回结果
         """
         t0 = time.monotonic()
+        from harness.context import harness_mode
+        action = parse_ticket_action(req.message)
+        if action:
+            return await self._run_ticket_action(req, action)
 
         # 1. 意图识别（如果调用方已识别则跳过）
         if req.intent is None:
@@ -996,6 +1005,65 @@ class AgentOrchestrator:
             routing_confidence=decision.confidence,
         )
         return await self._finalize_result(req, result)
+
+    async def _run_ticket_action(self, req: Request, action: Dict[str, str]) -> OrchestratorResult:
+        """Explicit backend action, independent of model routing and tool selection."""
+        started = time.monotonic()
+        name = action["action"]
+        store = getattr(self, "_ticket_store", None)
+        state = copy.deepcopy(req.case_state or {})
+        from harness.context import harness_mode
+        enabled = (req.harness_mode or harness_mode()) == "enforce"
+        if not enabled:
+            outcome = {"success": False, "error": "本地工单功能当前未开启，请启用 enforce 模式后再试；本次未创建或查询工单。"}
+        elif name == "create_ticket":
+            outcome = await create_ticket(req, store)
+        else:
+            outcome = await get_ticket(req, store)
+        success = outcome.get("success") is True
+        ticket = outcome.get("ticket") or {}
+        agent_type = AgentType.ESCALATION if name == "create_ticket" else AgentType.GENERAL
+        if not success:
+            content = outcome.get("error") or "本地工单操作未完成，请稍后重试。"
+        elif name == "create_ticket":
+            state["ticket_receipt"] = {
+                "ticket_id": ticket["ticket_id"], "status": ticket["status"],
+                "created_at": ticket["created_at"], "request_id": ticket["request_id"],
+                "source": "nexo_local",
+            }
+            prefix = "已在 Nexo 本地创建工单" if outcome.get("created") else "当前问题已有工单，返回原工单"
+            content = (f"{prefix}：{ticket['ticket_id']}。\n状态：{ticket['status']}（待处理）。"
+                       "\n工单保存在 Nexo 本地，尚未通知 IT 人员，也不代表人工已接单。")
+        elif outcome.get("found"):
+            content = (f"工单：{ticket['ticket_id']}\n状态：{ticket['status']}（待处理）"
+                       f"\n创建时间：{ticket['created_at']}\n问题：{ticket['summary']}\n来源：Nexo 本地工单记录，不代表已通知 IT 或人工已接单。")
+        else:
+            content = "当前用户与会话范围内未找到该工单，请核对工单编号。"
+        trace = {
+            "agent_type": agent_type.value, "tool_name": name,
+            "input": {"case_id": state.get("case_id")} if name == "create_ticket" else {"ticket_id": action["ticket_id"]},
+            "success": True, "result_success": success,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "error": outcome.get("error", ""),
+        }
+        if success and ticket:
+            trace["ticket_id"] = ticket["ticket_id"]
+            trace["ticket_status"] = ticket["status"]
+            if name == "create_ticket":
+                trace["created"] = outcome.get("created") is True
+        result = OrchestratorResult(
+            request_id=req.request_id, response=content, agent_type=agent_type, intent=req.intent,
+            escalated=name == "create_ticket" and success,
+            latency_ms=(time.monotonic() - started) * 1000,
+            agent_types=[agent_type], primary_agent=agent_type,
+            tools_used=[name] if enabled else [], tool_traces=[trace] if enabled else [],
+            harness_events=[{"event": "ticket_action", "action": name, "success": success}],
+            routing_reason="明确工单指令，执行后端确定性动作", routing_confidence=1.0,
+            case_state=state, validation={"status": "deterministic_action", "extra_calls": 0},
+            execution_success=success,
+        )
+        self._record_tool_trace(result)
+        return result
 
     async def run_parallel(self, req: Request, decision: RoutingDecision) -> OrchestratorResult:
         """

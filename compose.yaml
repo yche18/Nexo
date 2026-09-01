@@ -85,9 +85,11 @@ services:
       CHROMA_PERSIST_DIRECTORY: /app/data/chroma
       EVAL_BASELINE_PATH: /app/data/eval/baseline.json
       NEXO_SKILLS_DIR: /app/skills
+      NEXO_TICKET_DB_PATH: /app/data/tickets/tickets.sqlite3
     volumes:
       - ./data/chroma:/app/data/chroma
       - ./data/eval:/app/data/eval
+      - ticket-data:/app/data/tickets
       - ./backend/skills:/app/skills
       - ./logs:/app/logs
     depends_on:
@@ -145,3 +147,4 @@ volumes:
   prometheus-data:
   nginx-logs:
   elasticsearch-data:
+  ticket-data:

@@ -17,7 +17,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING, Union
@@ -61,6 +64,83 @@ def make_tool(
         },
         handler=handler,
     )
+
+
+def parse_ticket_action(message: str) -> Optional[Dict[str, str]]:
+    """Only complete explicit commands authorize local ticket operations."""
+    text = (message or "").strip().rstrip("。！!").strip()
+    if text in {
+        "请为当前问题创建工单", "请为当前问题创建报修单",
+        "帮我创建报修单", "帮我创建工单", "请创建工单", "创建工单",
+    }:
+        return {"action": "create_ticket"}
+    match = re.fullmatch(r"(?:请)?查询工单\s+(NEXO-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)", text, re.I)
+    if match:
+        return {"action": "get_ticket", "ticket_id": match.group(1).upper()}
+    return None
+
+
+def _ticket_snapshot(case: Dict[str, Any]) -> Dict[str, Any]:
+    """Save concise source-separated case information, never dialogue history."""
+    from harness.state import FACT_FIELDS
+    facts = {}
+    for key, item in case.get("facts", {}).items():
+        if key in FACT_FIELDS and isinstance(item, dict) and item.get("source") == "user_reported":
+            facts[key] = {name: copy.deepcopy(item[name]) for name in
+                          ("value", "source", "source_quote", "request_id") if name in item}
+    steps = [{key: copy.deepcopy(step[key]) for key in
+              ("step_id", "description", "status", "source", "source_quote", "result", "request_id")
+              if key in step} for step in case.get("steps", []) if isinstance(step, dict)]
+    return {
+        "user_facts": facts,
+        "asset_lookup": copy.deepcopy(case.get("asset_lookup") or {}),
+        "steps": steps,
+        "pending_questions": copy.deepcopy(case.get("pending_questions") or []),
+        "conflicts": copy.deepcopy(case.get("conflicts") or []),
+    }
+
+
+async def create_ticket(req: Request, store: Any) -> Dict[str, Any]:
+    """Backend-only action; not exposed through model tool schemas."""
+    from harness.context import harness_mode
+    action = parse_ticket_action(req.message)
+    if (req.harness_mode or harness_mode()) != "enforce" or not action or action["action"] != "create_ticket":
+        return {"success": False, "error": "尚未收到明确的工单创建指令"}
+    case = req.case_state or {}
+    if (not req.user_id or not req.conv_id or not case.get("case_id")
+            or case.get("user_id") != req.user_id or case.get("conv_id") != req.conv_id):
+        return {"success": False, "error": "当前问题状态尚未就绪，请先描述问题后再创建工单"}
+    issue = case.get("facts", {}).get("issue_description") or {}
+    summary = issue.get("value") if issue.get("source") == "user_reported" else None
+    if not isinstance(summary, str) or not summary.strip():
+        return {"success": False, "error": "当前尚无已记录的问题现象，请先说明具体故障，再明确请求创建工单"}
+    if any(item.get("field") == "issue_description" for item in case.get("conflicts", [])):
+        return {"success": False, "error": "已记录的问题现象存在冲突，请先确认后再创建工单"}
+    if store is None:
+        return {"success": False, "error": "本地工单存储尚未配置，未创建工单"}
+    try:
+        return await asyncio.to_thread(
+            store.create_ticket, req.user_id, req.conv_id, case["case_id"],
+            summary.strip(), _ticket_snapshot(case), req.request_id, req.message,
+        )
+    except Exception:
+        return {"success": False, "error": "本地工单存储暂不可用，请稍后重试；若已写入，重试将返回原工单"}
+
+
+async def get_ticket(req: Request, store: Any) -> Dict[str, Any]:
+    """Query only this user/conversation, without changing the active case."""
+    from harness.context import harness_mode
+    action = parse_ticket_action(req.message)
+    if (req.harness_mode or harness_mode()) != "enforce" or not action or action["action"] != "get_ticket":
+        return {"success": False, "error": "尚未收到明确的工单查询指令"}
+    if not req.user_id or not req.conv_id:
+        return {"success": False, "error": "缺少当前用户或会话信息，无法查询工单"}
+    if store is None:
+        return {"success": False, "error": "本地工单存储尚未配置，无法查询工单"}
+    try:
+        return await asyncio.to_thread(store.get_ticket, action["ticket_id"], req.user_id, req.conv_id)
+    except Exception:
+        return {"success": False, "error": "本地工单存储暂不可用，请稍后重试"}
 
 
 def inspect_request_context(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:

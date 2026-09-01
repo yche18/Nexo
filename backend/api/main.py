@@ -100,12 +100,23 @@ async def lifespan(app: FastAPI):
     )
     _skill_manager.load()
 
+    # 本地演示工单仅在 enforce 模式启用，独立于 Redis 会话状态持久化。
+    from core.ticket_store import TicketStore
+    from harness.context import harness_mode
+    ticket_store = None
+    if harness_mode() == "enforce":
+        ticket_path = os.getenv(
+            "NEXO_TICKET_DB_PATH", str(pathlib.Path(_ROOT).parent / "data" / "tickets" / "tickets.sqlite3"),
+        )
+        ticket_store = await asyncio.to_thread(TicketStore, ticket_path)
+
     # Agent 编排器
     _orchestrator = AgentOrchestrator(
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         skill_manager=_skill_manager,
+        ticket_store=ticket_store,
     )
 
     # 记忆管理器（Redis 工作记忆 + ChromaDB 情景记忆/用户画像）

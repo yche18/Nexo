@@ -13,7 +13,7 @@ def case_context(case):
         return ""
     public_state = {key: case.get(key) for key in (
         "case_id", "facts", "steps", "evidence_refs", "pending_questions",
-        "next_action", "status", "conflicts", "candidates", "latest_user_report", "asset_lookup",
+        "next_action", "status", "conflicts", "candidates", "latest_user_report", "asset_lookup", "ticket_receipt",
     )}
     return (
         "[当前 IT 问题的处理状态]\n"
@@ -23,6 +23,7 @@ def case_context(case):
         "asset_lookup 是后端保存的工具演示资料，不是用户确认事实或实时检测，不代表真实保修承诺。"
         "资产资料与用户陈述冲突时保留两方来源并澄清，不能用工具资料覆盖用户 facts。"
         "not_found 或 unavailable 不能沿用先前设备资料，也不能推断真实资产不存在。"
+        "ticket_receipt 是本地工单存储返回的回执，不代表已通知 IT 或人工接单；没有回执不能声称已创建工单。"
         "历史证据引用不是当前检索全文，不能凭引用补造内容。\n"
         + json.dumps(public_state, ensure_ascii=False)
     )

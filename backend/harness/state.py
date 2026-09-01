@@ -24,6 +24,7 @@ PROGRESS_DESCRIPTION = (
     "steps 只记用户实际操作或待执行建议，不记 Agent 自己的工具调用。"
     "proposed 步骤只填 step_id、description、status，不带 source_quote、result 或 result_quote。"
     "资产工具结果由后端独立保存，不要作为用户事实重复记录，也不能提交 asset_lookup。"
+    "工单回执也由后端独立保存，不得提交 ticket_receipt。"
     "evidence_refs 只填检索实际返回的 chunk_id，不拼接标题。"
     "只在用户明确更正时设置 correction，明确换问题时设置 new_case。"
     "不要记录密码、验证码或密钥。此工具不创建工单、不执行授权或设备操作。"
@@ -62,7 +63,7 @@ def new_case(user_id, conv_id):
         "case_id": uuid.uuid4().hex[:12], "user_id": user_id, "conv_id": conv_id,
         "version": 0, "facts": {}, "steps": [], "evidence_refs": [],
         "pending_questions": [], "next_action": "", "status": "collecting",
-        "conflicts": [], "candidates": [], "progress_warnings": [], "asset_lookup": {},
+        "conflicts": [], "candidates": [], "progress_warnings": [], "asset_lookup": {}, "ticket_receipt": {},
     }
 
 
