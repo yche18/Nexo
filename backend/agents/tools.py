@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -74,10 +75,34 @@ def parse_ticket_action(message: str) -> Optional[Dict[str, str]]:
         "帮我创建报修单", "帮我创建工单", "请创建工单", "创建工单",
     }:
         return {"action": "create_ticket"}
+    if text in {"查询当前工单", "查询我的工单进度", "查一下刚才那张单"}:
+        return {"action": "get_ticket", "ticket_id": ""}
     match = re.fullmatch(r"(?:请)?查询工单\s+(NEXO-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)", text, re.I)
     if match:
         return {"action": "get_ticket", "ticket_id": match.group(1).upper()}
     return None
+
+
+def access_field_values(req: Request) -> Dict[str, List[str]]:
+    """Business field checks only; never change the routing entities."""
+    from harness.context import harness_mode
+    from harness.state import CORRECTION
+    case = {}
+    if (req.harness_mode or harness_mode()) == "enforce":
+        case = req.case_state or {}
+    conflicts = {item.get("field") for item in case.get("conflicts", [])}
+    values = {}
+    for key in ("target_system", "purpose"):
+        current = list((req.entities or {}).get(key) or [])
+        fact = case.get("facts", {}).get(key) or {}
+        previous = [fact["value"]] if fact.get("source") == "user_reported" and fact.get("value") else []
+        if key in conflicts:
+            values[key] = []
+        elif current and previous and current != previous and not CORRECTION.search(req.message):
+            values[key] = []  # Different values need clarification, not silent replacement.
+        else:
+            values[key] = current or previous
+    return values
 
 
 def _ticket_snapshot(case: Dict[str, Any]) -> Dict[str, Any]:
@@ -100,31 +125,119 @@ def _ticket_snapshot(case: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def create_ticket(req: Request, store: Any) -> Dict[str, Any]:
-    """Backend-only action; not exposed through model tool schemas."""
-    from harness.context import harness_mode
-    action = parse_ticket_action(req.message)
-    if (req.harness_mode or harness_mode()) != "enforce" or not action or action["action"] != "create_ticket":
-        return {"success": False, "error": "尚未收到明确的工单创建指令"}
+def ticket_confirmation_reply(message: str) -> bool:
+    """Short approval is meaningful only with a delivered, matching proposal."""
+    text = (message or "").strip().rstrip("。！!，,").strip()
+    return text in {"需要", "好的", "好", "可以", "确认", "确定", "同意", "是的", "是", "要", "提交吧", "登记吧", "创建吧", "麻烦了", "好的，谢谢", "需要，谢谢"}
+
+
+def ticket_fingerprint(case: Dict[str, Any]) -> str:
+    # Provenance request IDs change when the same fact is recorded again.
+    def material(value):
+        if isinstance(value, dict):
+            return {key: material(item) for key, item in value.items()
+                    if key not in {"request_id", "source_quote"}}
+        if isinstance(value, list):
+            return [material(item) for item in value]
+        return value
+    payload = {"case_id": case.get("case_id"), "request_kind": case.get("request_kind"),
+               "snapshot": material(_ticket_snapshot(case))}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def ticket_confirmation_matches(req: Request) -> bool:
+    case = req.case_state or {}
+    pending = case.get("ticket_confirmation") or {}
+    return bool(ticket_confirmation_reply(req.message)
+                and pending.get("delivered") is True
+                and pending.get("request_id") != req.request_id
+                and pending.get("case_id") == case.get("case_id")
+                and pending.get("fingerprint") == ticket_fingerprint(case))
+
+
+def _ticket_material(req: Request) -> Dict[str, Any]:
+    """Keep the original scope, source and required-field checks in one place."""
     case = req.case_state or {}
     if (not req.user_id or not req.conv_id or not case.get("case_id")
             or case.get("user_id") != req.user_id or case.get("conv_id") != req.conv_id):
         return {"success": False, "error": "当前问题状态尚未就绪，请先描述问题后再创建工单"}
-    issue = case.get("facts", {}).get("issue_description") or {}
+    facts = case.get("facts", {})
+    issue = facts.get("issue_description") or {}
     summary = issue.get("value") if issue.get("source") == "user_reported" else None
-    if not isinstance(summary, str) or not summary.strip():
-        return {"success": False, "error": "当前尚无已记录的问题现象，请先说明具体故障，再明确请求创建工单"}
-    if any(item.get("field") == "issue_description" for item in case.get("conflicts", [])):
+    conflicts = {item.get("field") for item in case.get("conflicts", [])}
+    if "issue_description" in conflicts:
         return {"success": False, "error": "已记录的问题现象存在冲突，请先确认后再创建工单"}
+    if case.get("request_kind") == "access_request":
+        required = ("target_system", "purpose")
+        if conflicts.intersection((*required, "requested_access")):
+            return {"success": False, "error": "申请信息存在冲突，请先确认目标系统、用途和权限范围"}
+        missing = [label for key, label in (("target_system", "目标系统"), ("purpose", "申请用途"))
+                   if (facts.get(key) or {}).get("source") != "user_reported"
+                   or not str((facts.get(key) or {}).get("value") or "").strip()]
+        if missing:
+            return {"success": False, "error": "申请信息尚未齐全，请补充：" + "、".join(missing)}
+        parts = ["权限申请", "目标系统：" + facts["target_system"]["value"], "申请用途：" + facts["purpose"]["value"]]
+        access = facts.get("requested_access") or {}
+        if access.get("source") == "user_reported" and access.get("value"):
+            parts.append("申请权限：" + access["value"])
+        if summary:
+            parts.append("问题或需求：" + summary)
+        summary = "；".join(parts)
+    if not isinstance(summary, str) or not summary.strip():
+        return {"success": False, "error": "当前尚无已记录的问题或申请需求，请先补充具体信息，再明确请求创建工单"}
+    return {"success": True, "summary": summary.strip(), "snapshot": _ticket_snapshot(case)}
+
+
+def prepare_ticket(req: Request) -> Dict[str, Any]:
+    from harness.context import harness_mode
+    if (req.harness_mode or harness_mode()) != "enforce":
+        return {"success": False, "error": "本地工单功能当前未开启"}
+    material = _ticket_material(req)
+    if not material["success"]:
+        return material
+    case = req.case_state or {}
+    receipt = case.get("ticket_receipt") or {}
+    if receipt.get("source") == "nexo_local" and receipt.get("ticket_id"):
+        return {"success": True, "existing_receipt": receipt, "next_action": "当前问题已有工单，请返回原编号，不重新询问是否建单"}
+    pending = {"case_id": case["case_id"], "fingerprint": ticket_fingerprint(case),
+               "summary": material["summary"], "request_id": req.request_id, "delivered": False}
+    previous = case.get("ticket_confirmation") or {}
+    if previous.get("fingerprint") == pending["fingerprint"] and previous.get("delivered"):
+        pending = copy.deepcopy(previous)
+    return {"success": True, "ticket_confirmation": pending,
+            "confirmation_text": "待登记信息：" + material["summary"] + "\n需要我按以上信息登记工单吗？",
+            "next_action": "后端最终回复会附以上摘要与确认问题，请简短说明已整理，不重复询问；不能把本次准备当成用户同意"}
+
+
+async def create_ticket(req: Request, store: Any) -> Dict[str, Any]:
+    """The model chooses the tool; backend checks consent and builds the snapshot."""
+    from harness.context import harness_mode
+    action = parse_ticket_action(req.message)
+    explicit = bool(action and action["action"] == "create_ticket")
+    if (req.harness_mode or harness_mode()) != "enforce" or not (explicit or ticket_confirmation_matches(req)):
+        return {"success": False, "error": "尚未收到针对当前材料的明确确认，请先 prepare_ticket 展示摘要并等待用户同意"}
+    material = _ticket_material(req)
+    if not material["success"]:
+        return material
+    case = req.case_state or {}
     if store is None:
         return {"success": False, "error": "本地工单存储尚未配置，未创建工单"}
     try:
         return await asyncio.to_thread(
             store.create_ticket, req.user_id, req.conv_id, case["case_id"],
-            summary.strip(), _ticket_snapshot(case), req.request_id, req.message,
+            material["summary"], material["snapshot"], req.request_id, req.message,
         )
     except Exception:
         return {"success": False, "error": "本地工单存储暂不可用，请稍后重试；若已写入，重试将返回原工单"}
+
+
+def ticket_tools(prepare_handler, create_handler) -> Dict[str, AgentToolSpec]:
+    return {
+        "prepare_ticket": make_tool("prepare_ticket",
+            "需要后续 IT 处理时，先记录有用户原话依据的事实，再准备工单摘要供用户确认。此工具不建单。不要仅在回复中询问而不调用本工具。", {}, prepare_handler),
+        "create_ticket": make_tool("create_ticket",
+            "用户明确要求建单，或已展示待登记摘要且用户回复需要、好的、确认等同意后，调用此工具登记工单。后端核验确认和材料，重复提交返回原单；不执行审批授权。不得在用户未同意、拒绝或只要求人工时调用。", {}, create_handler),
+    }
 
 
 async def get_ticket(req: Request, store: Any) -> Dict[str, Any]:
@@ -137,8 +250,11 @@ async def get_ticket(req: Request, store: Any) -> Dict[str, Any]:
         return {"success": False, "error": "缺少当前用户或会话信息，无法查询工单"}
     if store is None:
         return {"success": False, "error": "本地工单存储尚未配置，无法查询工单"}
+    ticket_id = action["ticket_id"] or ((req.case_state or {}).get("ticket_receipt") or {}).get("ticket_id")
+    if not ticket_id:
+        return {"success": False, "error": "当前问题没有工单回执，请提供要查询的完整工单编号"}
     try:
-        return await asyncio.to_thread(store.get_ticket, action["ticket_id"], req.user_id, req.conv_id)
+        return await asyncio.to_thread(store.get_ticket, ticket_id, req.user_id, req.conv_id)
     except Exception:
         return {"success": False, "error": "本地工单存储暂不可用，请稍后重试"}
 
@@ -255,15 +371,17 @@ def lookup_asset(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
 
 def check_access_fields(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """检查申请信息是否齐全，不查询身份或执行授权。"""
-    fields = {
-        "target_system": bool(req.entities.get("target_system")),
-        "purpose": bool(req.entities.get("purpose")),
-    }
+    values = access_field_values(req)
+    fields = {key: bool(value) for key, value in values.items()}
+    account_only = (getattr(req.intent, "value", "") in {"account", "account_security"}
+                    and (req.case_state or {}).get("request_kind") != "access_request")
     return {
         "fields": fields,
-        "missing_fields": [name for name, present in fields.items() if not present],
+        "values": values,
+        "missing_fields": [] if account_only else [name for name, present in fields.items() if not present],
         "can_grant_access": False,
-        "reason": "当前工具只检查申请信息；实际开通需转人工（IT 支持）按审批流程处理",
+        "reason": ("当前为账号问题，不要求申请用途；确认涉及系统和问题后可登记处理工单，身份核验与重置仍由人工处理"
+                   if account_only else "当前工具只检查申请信息；实际开通需转人工（IT 支持）按审批流程处理"),
     }
 
 
@@ -383,7 +501,7 @@ def access_tools() -> Dict[str, AgentToolSpec]:
     return {
         "check_access_fields": make_tool(
             "check_access_fields",
-            "检查当前请求实体中的目标系统和申请用途是否齐全；无需传参，不查询或修改权限。",
+            "检查本轮实体和已记录用户事实中的目标系统、申请用途是否齐全；冲突需澄清，无需传参，不查询或修改权限。",
             {},
             check_access_fields,
         ),

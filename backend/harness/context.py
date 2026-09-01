@@ -12,8 +12,8 @@ def case_context(case):
     if not case:
         return ""
     public_state = {key: case.get(key) for key in (
-        "case_id", "facts", "steps", "evidence_refs", "pending_questions",
-        "next_action", "status", "conflicts", "candidates", "latest_user_report", "asset_lookup", "ticket_receipt",
+        "case_id", "request_kind", "facts", "steps", "evidence_refs", "pending_questions",
+        "next_action", "status", "conflicts", "candidates", "latest_user_report", "asset_lookup", "ticket_receipt", "ticket_confirmation",
     )}
     return (
         "[当前 IT 问题的处理状态]\n"
@@ -23,7 +23,8 @@ def case_context(case):
         "asset_lookup 是后端保存的工具演示资料，不是用户确认事实或实时检测，不代表真实保修承诺。"
         "资产资料与用户陈述冲突时保留两方来源并澄清，不能用工具资料覆盖用户 facts。"
         "not_found 或 unavailable 不能沿用先前设备资料，也不能推断真实资产不存在。"
-        "ticket_receipt 是本地工单存储返回的回执，不代表已通知 IT 或人工接单；没有回执不能声称已创建工单。"
+        "ticket_receipt 是本地工单存储返回的回执，不代表已通知 IT 或人工接单；没有回执不能声称已创建工单。用户侧可说明待人工处理，不反复解释内部接入；用户询问实际通知或审批进度时如实说明。"
+        "ticket_confirmation 是后端准备的待登记摘要，delivered=true 才表示已向用户展示；用户同意后调用 create_ticket，不要重复询问或要求固定口令。仅准备摘要不等于已建单。"
         "历史证据引用不是当前检索全文，不能凭引用补造内容。\n"
         + json.dumps(public_state, ensure_ascii=False)
     )

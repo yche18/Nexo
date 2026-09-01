@@ -9,7 +9,7 @@ def test_domain_documents_match_current_snapshot_and_reload_idempotently():
     kb = make_kb()
     kb._load_default_docs()
     # Startup SOP revisions have their own snapshot; old eval labels stay frozen.
-    snapshot_path = Path(__file__).parent / "fixtures/default_knowledge_v2.json"
+    snapshot_path = Path(__file__).parent / "fixtures/default_knowledge_v4.json"
     corpus = json.loads(snapshot_path.read_text(encoding="utf-8"))["corpus"]
     assert len(corpus) == len(kb._collection.rows) == 10
     for item in corpus:

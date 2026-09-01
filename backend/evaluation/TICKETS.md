@@ -24,8 +24,17 @@ enterprise ticket service without authenticated identity and access control.
 
 ## Explicit actions
 
-An ordinary request to transfer to a human still produces the existing handoff;
-it does not create a ticket. Creation requires one of these complete commands:
+An explicit request to transfer to a human produces a concise handoff marked
+“待人工处理”. It does not create or suggest a ticket. An existing receipt is
+shown in the handoff. This waiting label is not evidence of notification,
+dispatch or a human accepting the request; the backend remains a local demo. Creation is selected by the Agent through the existing Tool Use loop. It first
+calls `prepare_ticket` after recording user facts; this validates the material
+and stages a case-bound fingerprint. The delivery boundary shows the summary
+and confirmation question before marking that proposal as delivered. A later
+“需要”, “好的”, “可以” or “确认” authorizes only that unchanged proposal.
+Negation, ambiguity, changed material or a new topic requires clarification or
+another proposal. The model cannot supply IDs, snapshots or a `confirmed` flag.
+Alternatively these explicit requests authorize the Agent's `create_ticket` tool:
 
 - `请为当前问题创建工单`
 - `帮我创建报修单`
@@ -36,23 +45,37 @@ it does not create a ticket. Creation requires one of these complete commands:
 
 A final full stop or exclamation mark is accepted. Questions, conditional or
 negative statements and a command mixed with other text do not authorize a write.
-The current conversation must already have a stable case and a user-reported
-problem description. Otherwise, the response asks for the missing problem
-information instead of creating an empty record.
+The current conversation must already have a stable case. For a permission
+request, the existing recognized permission intent records `request_kind` in
+the independent case state; this does not change routing or entity extraction.
+Submission then requires user-reported target system and purpose, checks
+conflicts and includes the supplied access scope. Fault tickets retain their
+user-reported issue-description requirement. Incidental purpose text alone
+does not turn a fault into a permission request. New-topic reset clears the kind.
+
+Access field checks combine current extracted values and prior user facts in
+enforce mode without changing routing entities. Conflicts need clarification.
+Answers record collected fields before calling `prepare_ticket`. A short reply
+without a delivered matching proposal is not submission authorization.
 
 Use `查询工单 NEXO-<id>` or `请查询工单 NEXO-<id>` with the returned ticket ID to
 read its status. Lookup does not create a ticket, modify its receipt or trigger
-human escalation. Results are restricted to the current demo user/conversation.
+human escalation. `查询当前工单`, `查询我的工单进度` and `查一下刚才那张单`
+use the current receipt ID but still read SQLite under the same user/conversation
+scope. Without a receipt, the user must supply the complete ID. These commands
+do not provide real approval progress; there is no status-transition backend yet.
 
 A minimal flow in the same user/conversation is:
 
 1. Describe the device problem and, if available, provide its asset ID such as `NB-001`.
 2. Report only checks actually performed and their results. Requesting human handoff collects this information without creating a ticket.
-3. Send `请为当前问题创建工单` as a separate message. Repeat it to retrieve the original ticket instead of creating another.
+3. Confirm the displayed proposal with “需要”, or explicitly request `请为当前问题创建工单`. The Agent chooses the create tool; repeated submission returns the original ticket.
 4. Send `查询工单 <the complete returned ticket ID>` to read the pending record without another escalation.
 
-These actions are handled deterministically and do not use the model to authorize
-or execute a ticket write. The `/chat` API retains its existing intent-recognition
+Creation uses model tool selection with deterministic backend consent, scope and
+idempotency checks. Query commands retain their existing deterministic path.
+Only the primary Agent can prepare/create tickets in parallel runs. A write
+attempt blocks Agent fallback; a successful receipt survives final-answer failure. The `/chat` API retains its existing intent-recognition
 call before orchestration; that upstream call can still consume model tokens or
 fail. A recognized intent alone never authorizes ticket creation.
 
@@ -66,7 +89,8 @@ it is not the authoritative ticket database.
 
 A new issue must start a new case through the existing explicit new-topic flow.
 Repeated creation for an existing case returns the original record, rather than
-silently replacing its submitted description. A service/storage failure must be
+silently replacing its submitted description. The response explicitly notes that
+new dialogue details do not update the original ticket snapshot. A service/storage failure must be
 reported as a failure, not as a successful submission or notification.
 
 ## Configuration
@@ -116,3 +140,23 @@ version was 7 and working memory retained 14 messages. Records are retained unde
 snapshots, the build log and restart timestamps. This verifies the bounded
 frontend, state and persistence flow; it does not establish general diagnostic
 answer quality or external IT delivery.
+
+
+## Model-selected creation and natural confirmation
+
+Creation now uses the existing Agent Tool Use loop. `prepare_ticket` stages a
+case-bound proposal; only delivery of its summary activates short replies such
+as “需要” or “好的”. `create_ticket` receives no model-controlled identity,
+snapshot or consent parameters. It reads the latest validated case facts,
+checks consent and reuses the original SQLite uniqueness rule. Query commands
+remain deterministic. Only the primary Agent receives the two ticket tools.
+
+503 offline checks passed. A fixed Flash run and two scoped correction runs
+retained all 16 chat responses under `data/eval/ticket_tool_v1/first/`. The first
+run exposed missing preparation and an unwanted handoff suggestion; the next
+run exposed optional scope being treated as required. After those prompt
+corrections, the same permission question prepared a proposal, “需要” invoked
+creation, a repeat returned the original receipt and querying read that record.
+Denial and handoff produced no ticket. Concurrent writes, changed material,
+new-case identity and receipt recovery after model failure were checked offline.
+This bounded verification is not an overall answer-accuracy measurement.

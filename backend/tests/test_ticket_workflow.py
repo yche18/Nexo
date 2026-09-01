@@ -33,15 +33,39 @@ def request(message="请为当前问题创建工单", case=None, **kwargs):
     return Request(**values)
 
 
+class TicketClient:
+    """Exercise the real tool loop without a paid model call."""
+    def __init__(self):
+        self.messages = self
+        self.calls = []
+
+    async def create(self, **kwargs):
+        from types import SimpleNamespace
+        self.calls.append(kwargs)
+        last = kwargs["messages"][-1]["content"]
+        if isinstance(last, list) and last and last[0].get("type") == "tool_result":
+            value = json.loads(last[-1]["content"])
+            if value.get("ticket"):
+                content = "工单 " + value["ticket"]["ticket_id"] + " 待人工处理"
+                if value.get("created") is False:
+                    content += "；返回原单，不更新原单内容"
+            else:
+                content = value.get("error", "未创建工单")
+            return SimpleNamespace(content=[{"type": "text", "text": content}], stop_reason="end_turn")
+        return SimpleNamespace(content=[{"type": "tool_use", "id": "create1", "name": "create_ticket", "input": {}}], stop_reason="tool_use")
+
+
 def router(store):
-    result = AgentOrchestrator.__new__(AgentOrchestrator)
-    result._ticket_store = store
-    result._recent_tool_traces = deque()
+    result = AgentOrchestrator("offline", model="offline", ticket_store=store)
+    client = TicketClient()
+    for agents in result._pool.values():
+        for agent in agents:
+            agent._client = client
+    result._composer._client = client
     return result
 
 
 def run(orchestrator, req):
-    # A ticket command must not require an intent recognizer or model client.
     return asyncio.run(orchestrator.run(req))
 
 
@@ -78,7 +102,7 @@ def test_real_store_create_repeat_query_and_reload_keep_original_ticket(tmp_path
     assert result.tools_used == ["create_ticket"]
     assert result.tool_traces[0]["created"] is True
     assert result.tool_traces[0]["result_success"] is True
-    assert "尚未通知 IT" in result.response
+    assert "待人工处理" in result.response
     assert req.case_state == original_case
     assert result.case_state["facts"] == original_case["facts"]
     assert ticket_id in case_context(result.case_state)
@@ -137,7 +161,7 @@ def test_creation_requires_stable_scope_and_user_reported_problem(tmp_path, inva
         state["facts"]["issue_description"]["source"] = "model_generated"
     store = TicketStore(tmp_path / "tickets.sqlite3")
     result = run(router(store), request(case=state))
-    assert result.execution_success is False
+    assert result.tool_traces[0]["result_success"] is False
     assert not result.case_state.get("ticket_receipt")
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] == 0
@@ -172,7 +196,7 @@ def test_failed_store_does_not_fabricate_receipt_and_retry_uses_same_case(tmp_pa
     orchestrator = router(FailAfterCommit())
     req = request()
     failed = run(orchestrator, req)
-    assert failed.execution_success is False
+    assert failed.tool_traces[0]["result_success"] is False
     assert not failed.case_state.get("ticket_receipt")
     assert "private/storage/path" not in failed.response
     assert "ticket_id" not in failed.tool_traces[0]
@@ -183,7 +207,7 @@ def test_failed_store_does_not_fabricate_receipt_and_retry_uses_same_case(tmp_pa
         assert connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] == 1
 
 
-def test_model_progress_cannot_invent_ticket_receipt_and_tools_are_not_exposed():
+def test_model_progress_cannot_invent_receipt_and_write_tools_are_runtime_scoped():
     state = case_state()
     with pytest.raises(ValueError):
         apply_progress(state, {"ticket_receipt": {"ticket_id": "NEXO-FAKE"}}, "请创建工单", "r1")
@@ -197,7 +221,7 @@ def test_plain_handoff_keeps_original_text_and_does_not_create_ticket(tmp_path):
     store = TicketStore(tmp_path / "tickets.sqlite3")
     req = request("请转人工", intent=IntentCategory.HUMAN_HANDOFF)
     response = asyncio.run(EscalationAgent(None, "offline").handle(req))
-    assert "尚未创建工单或通知 IT 人员" in response.content
+    assert "待人工处理" in response.content
     assert req.case_state["ticket_receipt"] == {}
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] == 0

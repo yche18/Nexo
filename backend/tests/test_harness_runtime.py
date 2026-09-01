@@ -140,7 +140,7 @@ def test_finalizer_runs_on_composed_text_and_preserves_case_on_handoff(monkeypat
     assert captured[0][0] == '最终汇总文本'
     assert output.escalated
     assert 'SAP' in output.response
-    assert '尚未创建工单' in output.response
+    assert '待人工处理' in output.response
     assert output.case_state['status'] == 'handoff_ready'
     assert output.agent_type == AgentType.ESCALATION
 
@@ -287,7 +287,7 @@ def test_runtime_failure_is_not_sent_to_semantic_validator(monkeypatch):
     assert output.validation['extra_calls'] == 0
     assert output.case_state['status'] == 'handoff_ready'
     assert 'SAP' in output.response
-    assert '尚未创建工单' in output.response
+    assert '待人工处理' in output.response
     assert client.calls == []
 
 
@@ -397,7 +397,7 @@ def test_run_routes_then_executes_general_fallback_and_real_finalizer():
             assert len(judge.calls) == 1  # explicit handoff adds no model request
         assert '目标系统：VPN' in result.response
         assert '重启客户端：仍超时' in result.response
-        assert '尚未创建工单' in result.response
+        assert '待人工处理' in result.response
         assert result.case_state['status'] == 'handoff_ready'
 
 

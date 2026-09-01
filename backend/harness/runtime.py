@@ -1,5 +1,6 @@
 """Shared request-local Agent loop; business routing remains in the orchestrator."""
 import copy
+from dataclasses import replace
 import os
 import inspect
 import json
@@ -16,7 +17,7 @@ async def run_agent(agent, req):
     from agents.agent_orchestrator import AgentCallResult, AgentCallError
     from harness.context import build_messages, harness_mode
     from harness.state import PROGRESS_SCHEMA, PROGRESS_DESCRIPTION, apply_progress, apply_asset_lookup, new_case
-    from agents.tools import AgentToolSpec
+    from agents.tools import AgentToolSpec, ticket_tools, prepare_ticket, create_ticket
 
     mode = req.harness_mode or harness_mode()
     messages = build_messages(req, agent._build_role_packet(req))
@@ -24,12 +25,23 @@ async def run_agent(agent, req):
     updates = []
     local_state = copy.deepcopy(req.case_state) if req.case_state else new_case(req.user_id, req.conv_id)
 
+    if getattr(req.intent, "value", "") == "permission_request":
+        local_state["request_kind"] = "access_request"
+
+    def prepare_local_ticket(request, args):
+        return prepare_ticket(replace(request, case_state=local_state))
+
+    async def create_local_ticket(request, args):
+        return await create_ticket(replace(request, case_state=local_state), agent._ticket_store)
+
     def event(kind, **details):
         if mode != "off":
             events.append({"event": kind, "agent_type": agent.agent_type.value, **details})
 
     def record_progress(request, args):
         nonlocal local_state
+        if any(trace.get("tool_name") == "create_ticket" and trace.get("result_success") for trace in tool_traces):
+            return {"success": False, "error": "工单已登记，本轮不再修改提交材料，请根据真实回执回答"}
         local_state = apply_progress(local_state, args, request.message, request.request_id,
                                      evidence_refs=evidence_ids(tool_traces))
         updates.append(copy.deepcopy(args))
@@ -45,6 +57,8 @@ async def run_agent(agent, req):
             name="record_support_progress", description=PROGRESS_DESCRIPTION,
             input_schema=PROGRESS_SCHEMA, handler=record_progress,
         )
+        if req.ticket_tools_allowed and getattr(agent, "_ticket_store", None) is not None:
+            tools.update(ticket_tools(prepare_local_ticket, create_local_ticket))
     tools_used: List[str] = []
     tool_traces: List[Dict[str, Any]] = []
     event("run_started", mode=mode)
@@ -63,6 +77,16 @@ async def run_agent(agent, req):
                 request_kwargs["system"] += (
                     "\n[任务进度] 多轮排障、权限信息收集时，使用 record_support_progress 记录本轮有原文依据的事实和步骤。"
                     "建议执行不等于用户已经执行；工具信息只表明其实际返回结果。无需为问候调用进度工具。"
+                )
+            if "prepare_ticket" in tools:
+                request_kwargs["system"] += (
+                    "\n[工单工具契约] 需要后续 IT 处理且材料齐全时，先调用 record_support_progress 记录用户事实，"
+                    "紧接着调用 prepare_ticket；可以在同一轮按此顺序调用这两个工具。"
+                    "权限申请以 check_access_fields 的 missing_fields 为准；为空时目标系统和用途已经齐全，权限范围是可选项，不要再以补充范围为由推迟 prepare_ticket。"
+                    "没有 prepare_ticket 成功结果，禁止仅在文字中询问是否登记工单，否则用户的下一句同意无法对应已展示材料。"
+                    "prepare_ticket 后后端会附上待登记摘要与确认问题，你只简短说明已整理，不重复提问。"
+                    "已有 delivered=true 的 ticket_confirmation 且用户同意时直接调用 create_ticket，不重复准备或询问，不把同意当作新的权限咨询。"
+                    "用户明确请求人工（包括同时描述账号或其他故障的混合句）时，只整理交接信息并说明待人工处理；不要建议或询问是否建单，也不调用工单工具。"
                 )
             request_kwargs.update(thinking_request_kwargs())
             if tools:
@@ -175,6 +199,24 @@ async def run_agent(agent, req):
                                                   "configuration", "warranty_until") if key in result["asset"]}
                         trace["asset_lookup"] = snapshot
                     local_state = apply_asset_lookup(local_state, trace, req.request_id)
+                if mode == "enforce" and name in {"prepare_ticket", "create_ticket"} and tool_executed:
+                    trace = tool_traces[-1]
+                    if name == "create_ticket":
+                        trace["write_attempted"] = True
+                    if call_success and result_success:
+                        if name == "prepare_ticket" and result.get("ticket_confirmation"):
+                            local_state["ticket_confirmation"] = copy.deepcopy(result["ticket_confirmation"])
+                        if name == "create_ticket" and result.get("ticket"):
+                            ticket = result["ticket"]
+                            local_state["ticket_receipt"] = {
+                                key: ticket[key] for key in ("ticket_id", "status", "created_at", "request_id")
+                            }
+                            local_state["ticket_receipt"]["source"] = "nexo_local"
+                            local_state["ticket_confirmation"] = {}
+                            trace.update(ticket_id=ticket["ticket_id"], ticket_status=ticket["status"],
+                                         created=result.get("created") is True)
+                        trace["ticket_state"] = {key: copy.deepcopy(local_state.get(key)) for key in
+                                                 ("case_id", "ticket_confirmation", "ticket_receipt")}
                 event("tool_finished", tool_name=name, success=call_success,
                       result_success=result_success, error=error_text)
                 # 完整证据已在 results 中；trace 保留证据，模型只接收一份。

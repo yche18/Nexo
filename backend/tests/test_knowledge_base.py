@@ -109,16 +109,13 @@ def test_default_corpus_preserves_unchanged_docs_and_updated_vpn_snapshot():
     kb._load_default_docs()
     path = Path(__file__).parents[1] / "evaluation/datasets/rag_support_v1.json"
     corpus = json.loads(path.read_text(encoding="utf-8"))["corpus"]
-    # Keep the historical evaluation corpus unchanged. Only the approved VPN
-    # revision uses the separately frozen current-document snapshot.
-    snapshot_path = Path(__file__).parent / "fixtures/default_knowledge_v2.json"
+    # Frozen v1/v2 data remains unchanged; approved business wording uses v3.
+    snapshot_path = Path(__file__).parent / "fixtures/default_knowledge_v4.json"
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))["corpus"]
-    vpn = next(item for item in snapshot if item["title"] == "VPN 连接排查（演示资料）")
-    expected = {item["id"]: item for item in corpus
-                if item["title"] not in {"权限申请补充规范", vpn["title"]}}
-    assert len(expected) == 5
-    expected[vpn["id"]] = vpn
-    assert len(expected) == 6
+    titles = {item["title"] for item in corpus if item["title"] != "权限申请补充规范"}
+    expected = {item["id"]: item for item in snapshot if item["title"] in titles}
+    assert len(titles) == 6
+    assert {item["title"] for item in expected.values()} == titles
     for chunk_id, item in expected.items():
         content, meta = kb._collection.rows[chunk_id]
         assert content == item["content"]

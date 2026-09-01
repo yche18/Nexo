@@ -61,9 +61,9 @@ PROGRESS_SCHEMA = {
 def new_case(user_id, conv_id):
     return {
         "case_id": uuid.uuid4().hex[:12], "user_id": user_id, "conv_id": conv_id,
-        "version": 0, "facts": {}, "steps": [], "evidence_refs": [],
+        "version": 0, "request_kind": "", "facts": {}, "steps": [], "evidence_refs": [],
         "pending_questions": [], "next_action": "", "status": "collecting",
-        "conflicts": [], "candidates": [], "progress_warnings": [], "asset_lookup": {}, "ticket_receipt": {},
+        "conflicts": [], "candidates": [], "progress_warnings": [], "asset_lookup": {}, "ticket_receipt": {}, "ticket_confirmation": {},
     }
 
 
@@ -75,6 +75,10 @@ def prepare_case(case, user_message):
     if not NEW_TOPIC.search(user_message):
         continued = copy.deepcopy(case)
         continued.pop("new_topic", None)
+        from agents.tools import parse_ticket_action, ticket_confirmation_reply
+        action = parse_ticket_action(user_message)
+        if not ticket_confirmation_reply(user_message) and not (action and action["action"] == "create_ticket"):
+            continued["ticket_confirmation"] = {}
         asset_lookup = continued.get("asset_lookup") or {}
         asset_id = str(asset_lookup.get("asset_id") or "").upper()
         mentioned_ids = re.findall(r"(?<![A-Za-z0-9-])(?:NB|PC|PR)-\d+(?![A-Za-z0-9-])", user_message, re.I)

@@ -33,9 +33,11 @@ from anthropic import AsyncAnthropic
 
 from agents.tools import (
     AgentToolSpec,
-    create_ticket,
+    check_access_fields,
     get_ticket,
     parse_ticket_action,
+    ticket_confirmation_matches,
+    ticket_fingerprint,
     build_shared_rag_tools,
     access_tools,
     device_tools,
@@ -170,6 +172,7 @@ class Request:
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     case_state: Dict[str, Any] = field(default_factory=dict)
     harness_mode: Optional[str] = None
+    ticket_tools_allowed: bool = True
 
 
 @dataclass
@@ -317,6 +320,11 @@ class BaseAgent:
 
     def _build_system_prompt(self, req: Request) -> str:
         """把角色契约和动态 Skills 拼入 system prompt。"""
+        from harness.context import harness_mode
+        tool_scope = list(self.profile.tool_scope)
+        if ((req.harness_mode or harness_mode()) == "enforce" and req.ticket_tools_allowed
+                and getattr(self, "_ticket_store", None) is not None):
+            tool_scope.extend(["prepare_ticket", "create_ticket"])
         profile_prompt = (
             f"\n\n[角色契约]\n"
             f"角色：{self.profile.role}\n"
@@ -325,7 +333,7 @@ class BaseAgent:
             f"可用输入：{'；'.join(self.profile.input_contract)}\n"
             f"输出要求：{'；'.join(self.profile.output_contract)}\n"
             f"升级条件：{'；'.join(self.profile.handoff_conditions) or '无，按通用客服规则处理'}\n"
-            f"允许的数据/工具范围：{'、'.join(self.profile.tool_scope) or '仅使用当前请求上下文'}\n"
+            f"允许的数据/工具范围：{'、'.join(tool_scope) or '仅使用当前请求上下文'}\n"
             "不要声称执行了未提供的查询、修改或授权操作；缺少证据时明确说明需要核验。\n"
             "[IT 支持实体] target_system=目标系统，issue_description=问题现象，date=发生时间，"
             "error_code=错误码，requested_access=申请权限，purpose=申请用途，"
@@ -333,6 +341,18 @@ class BaseAgent:
             "impact_scope=影响范围，device_type=设备类型，device_model=设备型号。"
             "实体仅由本轮消息的规则匹配得到，空值表示未提取到，不代表用户没有该信息；结合原文和已有上下文理解。"
         )
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce":
+            profile_prompt += (
+                "\n[支持流程与工单] 可以登记工单并查询记录状态，不执行实际审批、授权、密码重置或维修。"
+                "权限申请信息齐全，或账号/软件/网络/设备问题需要后续处理时，调用 prepare_ticket 准备摘要供用户确认。"
+                "申请字段应先用 record_support_progress 保存有原话依据的事实；不能只在回复里列出。"
+                "用户同意已展示的摘要（如需要、好的、确认），或明确请求建单后，自主调用 create_ticket 并根据工具回执回答，不重复询问、不要求固定口令。确认含糊、取消或材料变更时不直接建单。只有主 Agent 可用建单工具，协作 Agent 只处理自己领域。"
+                "用户明确要求人工时，只整理交接摘要并说明‘待人工处理’，不主动建议创建工单；这不表示已建单或有人接手。"
+                "已有 ticket_receipt 时带上编号，不再建议重复建单；补充信息不自动更新原单。"
+                "查询当前工单可引导用户单独发送‘查询当前工单’，真实审批进度和实际开通结果仍需 IT 核验。"
+                "咨询已回答或问题已解决时正常收尾，不强行建单；不要反复向用户解释未通知 IT 等内部接入情况。"
+            )
         base_prompt = f"{self.system_prompt}{profile_prompt}"
         if self._skill_manager is None:
             return base_prompt
@@ -440,7 +460,7 @@ class NetworkAgent(TechnicalAgent):
         "先查询知识库，找到适用 SOP 后保留必要步骤，不再调用通用诊断工具生成另一套流程。"
         "结合用户已执行的操作继续排查，不把未执行的建议记作完成。"
         "申请 VPN 使用权限属于 Access；软件崩溃属于 Technical；硬件损坏属于 Device。"
-        "没有实际网络探测或后台管理工具，不声称已测试连接、修改配置或创建工单。"
+        "没有实际网络探测或后台管理工具，不声称已测试连接或修改配置；工单创建以实际回执为准。"
     )
 
 
@@ -487,23 +507,22 @@ class AccessAgent(BaseAgent):
     )
     system_prompt = (
         "你是 Nexo 的账号与权限支持专家，负责企业账号咨询与权限申请指引。"
-        "按知识库说明流程；使用 check_access_fields 检查已提取的目标系统与用途，按缺失字段补问。"
-        "你未接入身份、审批或权限系统，不得声称已查询权限、提交申请、完成审批或开通账号。"
+        "按知识库说明流程；权限申请使用 check_access_fields 检查目标系统与用途，按缺失字段补问。账号恢复、密码重置不以申请用途为必填，不套用权限审批材料清单。"
+        "可帮助登记权限申请工单；未接入身份、审批或权限系统，不得声称已核验身份、提交到真实审批系统、完成审批或开通账号。"
         "登录故障由 Technical 排查，网络连接故障由 Network 排查；需要实际操作时建议转人工（IT 支持），不索要密码和验证码。"
     )
 
     def _build_role_packet(self, req: Request) -> str:
         packet = json.loads(super()._build_role_packet(req))
+        checked = check_access_fields(req, {})
+        values = checked["values"]
         packet["application_fields"] = {
-            "target_system": req.entities.get("target_system", []),
-            "purpose": req.entities.get("purpose", []),
-            "missing_fields": [
-                field for field, values in (
-                    ("目标系统", req.entities.get("target_system", [])),
-                    ("申请用途", req.entities.get("purpose", [])),
-                ) if not values
-            ],
-            "risk_boundary": "只提供指引，不查询身份、不执行授权、不承诺审批结果",
+            "target_system": values["target_system"],
+            "purpose": values["purpose"],
+            "missing_fields": [label for key, label in (("target_system", "目标系统"), ("purpose", "申请用途"))
+                               if key in checked["missing_fields"]],
+            "check_scope": checked["reason"],
+            "risk_boundary": "可以登记申请工单，不查询身份、不执行授权、不承诺审批结果",
         }
         return json.dumps(packet, ensure_ascii=False)
 
@@ -689,7 +708,11 @@ class EscalationAgent(BaseAgent):
             for conflict in req.case_state.get("conflicts", []):
                 fields.pop(conflict.get("field"), None)
         details = [f"- {label}：{fields[key]}" for key, label in entity_labels.items() if fields.get(key)]
-        sections = ["我已将您的问题标记为 IT 人工处理。"]
+        receipt = (req.case_state or {}).get("ticket_receipt") or {}
+        if receipt.get("source") == "nexo_local" and receipt.get("ticket_id"):
+            sections = [f"工单 {receipt['ticket_id']} 当前待人工处理，交接信息如下。"]
+        else:
+            sections = ["已整理您的问题和相关信息，当前待人工处理。"]
         if details:
             sections.append("**交接信息**\n" + "\n".join(details))
         else:
@@ -726,7 +749,7 @@ class EscalationAgent(BaseAgent):
                     quoted += "…"
                 sections.append("**最新反馈（用户原话）**\n" + quoted
                                 + "\n以上是用户反馈，待 IT 人员核验，不代表系统已代为执行或确认解决。")
-        sections.append("请不要发送密码、短信验证码或完整密钥；以上仅为交接说明，尚未创建工单或通知 IT 人员。")
+        sections.append("请不要发送密码、短信验证码或完整密钥。")
         content = "\n\n".join(sections)
         ms = (time.monotonic() - t0) * 1000
         self.stats.success += 1
@@ -862,6 +885,9 @@ class AgentOrchestrator:
             AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager)],
         }
         self.set_shared_tools(build_shared_rag_tools(rag_tool_manager))
+        for agents in self._pool.values():
+            for agent in agents:
+                agent._ticket_store = ticket_store
 
     @staticmethod
     def _make_agent(
@@ -942,8 +968,12 @@ class AgentOrchestrator:
         t0 = time.monotonic()
         from harness.context import harness_mode
         action = parse_ticket_action(req.message)
-        if action:
+        mode = req.harness_mode or harness_mode()
+        if action and (action["action"] == "get_ticket" or mode != "enforce"):
             return await self._run_ticket_action(req, action)
+        ticket_turn = mode == "enforce" and (
+            bool(action and action["action"] == "create_ticket") or ticket_confirmation_matches(req)
+        )
 
         # 1. 意图识别（如果调用方已识别则跳过）
         if req.intent is None:
@@ -953,7 +983,7 @@ class AgentOrchestrator:
             req.urgency = intent_result.urgency
             req.intent_confidence = intent_result.confidence
 
-        if self._needs_clarification(req):
+        if not ticket_turn and self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
                 response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
@@ -969,7 +999,11 @@ class AgentOrchestrator:
             return await self._finalize_result(req, result)
 
         # 复杂问题自动并行协作，例如同一句同时涉及登录故障和扣款/退款。
-        decision = self._route_decision(req)
+        if ticket_turn:
+            decision = RoutingDecision(primary_agent=AgentType.GENERAL,
+                                       reason="继续当前工单确认，由 Agent 选择工具", confidence=1.0)
+        else:
+            decision = self._route_decision(req)
         if decision.multi_agent:
             return await self.run_parallel(req, decision)
 
@@ -1007,7 +1041,7 @@ class AgentOrchestrator:
         return await self._finalize_result(req, result)
 
     async def _run_ticket_action(self, req: Request, action: Dict[str, str]) -> OrchestratorResult:
-        """Explicit backend action, independent of model routing and tool selection."""
+        """Keep deterministic ticket queries and the disabled-mode response."""
         started = time.monotonic()
         name = action["action"]
         store = getattr(self, "_ticket_store", None)
@@ -1017,31 +1051,22 @@ class AgentOrchestrator:
         if not enabled:
             outcome = {"success": False, "error": "本地工单功能当前未开启，请启用 enforce 模式后再试；本次未创建或查询工单。"}
         elif name == "create_ticket":
-            outcome = await create_ticket(req, store)
+            outcome = {"success": False, "error": "建单需由 Agent 调用 create_ticket 工具"}
         else:
             outcome = await get_ticket(req, store)
         success = outcome.get("success") is True
         ticket = outcome.get("ticket") or {}
-        agent_type = AgentType.ESCALATION if name == "create_ticket" else AgentType.GENERAL
+        agent_type = AgentType.GENERAL
         if not success:
             content = outcome.get("error") or "本地工单操作未完成，请稍后重试。"
-        elif name == "create_ticket":
-            state["ticket_receipt"] = {
-                "ticket_id": ticket["ticket_id"], "status": ticket["status"],
-                "created_at": ticket["created_at"], "request_id": ticket["request_id"],
-                "source": "nexo_local",
-            }
-            prefix = "已在 Nexo 本地创建工单" if outcome.get("created") else "当前问题已有工单，返回原工单"
-            content = (f"{prefix}：{ticket['ticket_id']}。\n状态：{ticket['status']}（待处理）。"
-                       "\n工单保存在 Nexo 本地，尚未通知 IT 人员，也不代表人工已接单。")
         elif outcome.get("found"):
-            content = (f"工单：{ticket['ticket_id']}\n状态：{ticket['status']}（待处理）"
-                       f"\n创建时间：{ticket['created_at']}\n问题：{ticket['summary']}\n来源：Nexo 本地工单记录，不代表已通知 IT 或人工已接单。")
+            content = (f"工单：{ticket['ticket_id']}\n状态：{ticket['status']}（待人工处理）"
+                       f"\n创建时间：{ticket['created_at']}\n问题或申请：{ticket['summary']}")
         else:
             content = "当前用户与会话范围内未找到该工单，请核对工单编号。"
         trace = {
             "agent_type": agent_type.value, "tool_name": name,
-            "input": {"case_id": state.get("case_id")} if name == "create_ticket" else {"ticket_id": action["ticket_id"]},
+            "input": {"case_id": state.get("case_id")} if name == "create_ticket" else {"ticket_id": action["ticket_id"] or (state.get("ticket_receipt") or {}).get("ticket_id", "")},
             "success": True, "result_success": success,
             "latency_ms": round((time.monotonic() - started) * 1000, 1),
             "error": outcome.get("error", ""),
@@ -1072,7 +1097,8 @@ class AgentOrchestrator:
         """
         t0 = time.monotonic()
         agent_types = decision.agent_types
-        tasks = [self._execute(req, at) for at in agent_types]
+        tasks = [self._execute(replace(req, ticket_tools_allowed=at == decision.primary_agent), at)
+                 for at in agent_types]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_responses = [r for r in responses if isinstance(r, AgentResponse)]
@@ -1128,7 +1154,7 @@ class AgentOrchestrator:
     def _merge_case_state(req, updates, traces, events):
         from harness.state import apply_progress, apply_asset_lookup, new_case
         from harness.runtime import evidence_ids
-        state = req.case_state or new_case(req.user_id, req.conv_id)
+        state = copy.deepcopy(req.case_state) if req.case_state else new_case(req.user_id, req.conv_id)
         topic_reset = False
         for update in updates:
             candidate = dict(update)
@@ -1142,6 +1168,23 @@ class AgentOrchestrator:
                 events.append({"event": "state_update_rejected", "reason": str(ex)})
         for trace in traces:
             state = apply_asset_lookup(state, trace, req.request_id)
+        if req.intent == IntentCategory.PERMISSION_REQUEST:
+            state["request_kind"] = "access_request"
+        for trace in traces:
+            ticket_state = trace.get("ticket_state") or {}
+            # A replayed new_case gets a new UUID; retain the actual tool's case ID.
+            if (ticket_state.get("case_id") and trace.get("success") and trace.get("result_success")
+                    and trace.get("tool_name") in {"prepare_ticket", "create_ticket"}
+                    and any(update.get("new_case") for update in updates)):
+                state["case_id"] = ticket_state["case_id"]
+            if (trace.get("tool_name") in {"prepare_ticket", "create_ticket"}
+                    and trace.get("success") and trace.get("result_success")
+                    and ticket_state.get("case_id") == state.get("case_id")):
+                for key in ("ticket_confirmation", "ticket_receipt"):
+                    state[key] = copy.deepcopy(ticket_state.get(key) or {})
+        pending = state.get("ticket_confirmation") or {}
+        if pending and pending.get("fingerprint") != ticket_fingerprint(state):
+            state["ticket_confirmation"] = {}
         return state
 
     async def _finalize_result(self, req: Request, result: OrchestratorResult) -> OrchestratorResult:
@@ -1198,6 +1241,28 @@ class AgentOrchestrator:
             if report:
                 result.case_state["latest_user_report"] = report
             result.case_state["status"] = "handoff_ready"
+        if mode == "enforce":
+            receipt = result.case_state.get("ticket_receipt") or {}
+            ticket_written = any(trace.get("tool_name") == "create_ticket" and trace.get("result_success")
+                                 and trace.get("ticket_id") for trace in result.tool_traces)
+            if ticket_written and receipt.get("source") == "nexo_local":
+                receipt_text = f"工单 {receipt['ticket_id']} 已登记，当前待人工处理。可发送‘查询当前工单’查看记录状态。"
+                if not result.execution_success or checked.status in {"needs_handoff", "runtime_failed"}:
+                    result.response = receipt_text
+                    result.harness_events.append({"event": "ticket_receipt_recovered"})
+                elif receipt["ticket_id"] not in result.response:
+                    result.response += "\n\n" + receipt_text
+                result.case_state["ticket_confirmation"] = {}
+            pending = result.case_state.get("ticket_confirmation") or {}
+            if pending and not pending.get("delivered"):
+                if (result.execution_success and not explicit_handoff
+                        and pending.get("fingerprint") == ticket_fingerprint(result.case_state)):
+                    question = "需要我按以上信息登记工单吗？"
+                    if pending["summary"] not in result.response or question not in result.response:
+                        result.response += "\n\n待登记信息：" + pending["summary"] + "\n" + question
+                    pending["delivered"] = True
+                else:
+                    result.case_state["ticket_confirmation"] = {}
         result.latency_ms += (time.monotonic() - finalize_started) * 1000
         self._record_tool_trace(result)
         return result
@@ -1485,6 +1550,10 @@ class AgentOrchestrator:
             )
 
         response = await agent.handle(req)
+
+        if not response.success and any(trace.get("write_attempted") for trace in response.tool_traces):
+            response.harness_events.append({"event": "agent_fallback_blocked", "reason": "ticket_write_attempted"})
+            return response
 
         # 专属 Agent 失败时降级到 GeneralAgent
         if not response.success and agent_type not in (AgentType.GENERAL, AgentType.ESCALATION):
