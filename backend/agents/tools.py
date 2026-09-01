@@ -19,10 +19,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from agents.agent_orchestrator import Request
+
+
+DEMO_ASSETS_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "demo_assets.json"
 
 
 AgentToolHandler = Callable[["Request", Dict[str, Any]], Union[Any, Awaitable[Any]]]
@@ -127,6 +131,45 @@ def build_diagnostic_plan(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
         "environment": environment,
         "reproduced": reproduced,
         "diagnostic_steps": steps,
+    }
+
+
+def lookup_asset(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
+    """设备工具：精确查询公开虚构资产，不查询真实企业资产或执行身份核验。"""
+    asset_id = args.get("asset_id") if isinstance(args, dict) else None
+    if not isinstance(asset_id, str) or not asset_id.strip():
+        return {"success": False, "source": "demo", "error": "asset_id 必须是非空字符串"}
+    asset_id = asset_id.strip().upper()
+    fields = ("asset_id", "device_type", "device_model", "operating_system",
+              "configuration", "warranty_until")
+    try:
+        assets = json.loads(DEMO_ASSETS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(assets, list) or any(
+            not isinstance(asset, dict)
+            or any(not isinstance(asset.get(field), str) or not asset[field].strip() for field in fields)
+            for asset in assets
+        ):
+            raise ValueError("invalid demo assets")
+    except (OSError, ValueError):
+        return {"success": False, "source": "demo", "error": "演示资产数据暂不可用，请稍后重试"}
+
+    for asset in assets:
+        if asset["asset_id"] == asset_id:
+            return {
+                "success": True,
+                "found": True,
+                "source": "demo",
+                "asset_id": asset_id,
+                "asset": {field: asset[field] for field in fields},
+                "notice": "仅为公开虚构演示资产，不代表真实企业资产或保修状态",
+            }
+    return {
+        "success": True,
+        "found": False,
+        "source": "demo",
+        "asset_id": asset_id,
+        "asset": None,
+        "notice": "未在公开虚构演示资产目录中找到该编号，不代表真实资产不存在",
     }
 
 
@@ -240,6 +283,18 @@ def technical_tools() -> Dict[str, AgentToolSpec]:
             },
             build_diagnostic_plan,
             required=["environment", "reproduced"],
+        ),
+    }
+
+
+def device_tools() -> Dict[str, AgentToolSpec]:
+    return {
+        "lookup_asset": make_tool(
+            "lookup_asset",
+            "按明确的资产编号查询公开虚构演示资产的设备型号、配置和保修日期；不是企业资产系统，不核验身份或归属。未知编号返回未找到，不应编造或猜测资产编号。",
+            {"asset_id": {"type": "string", "description": "用户提供的资产编号，例如 NB-001"}},
+            lookup_asset,
+            required=["asset_id"],
         ),
     }
 

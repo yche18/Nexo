@@ -35,6 +35,7 @@ from agents.tools import (
     AgentToolSpec,
     build_shared_rag_tools,
     access_tools,
+    device_tools,
     escalation_tools,
     general_tools,
     technical_tools,
@@ -449,7 +450,7 @@ class DeviceAgent(BaseAgent):
         input_contract=("设备类型", "设备型号", "问题现象", "发生时间", "影响范围", "知识库上下文"),
         output_contract=("现象确认", "必要检查步骤", "验证方式", "需补充信息", "维修交接边界"),
         handoff_conditions=("冒烟、异味、电池鼓包或漏电", "需要拆机或更换部件", "适用检查后仍未恢复"),
-        tool_scope=("search_knowledge_base",),
+        tool_scope=("search_knowledge_base", "lookup_asset"),
         temperature=0.1,
         max_tokens=1200,
     )
@@ -459,8 +460,13 @@ class DeviceAgent(BaseAgent):
         "先查询知识库，按适用设备 SOP 回答，信息不足时只询问本轮必要字段。"
         "不要把软件网络通用诊断流程套用到硬件故障；已明确的应用安装和崩溃由 Technical 处理，已明确的网络连接故障由 Network 处理。"
         "只提供安全的外部检查，不要求拆机、带电维修或反复强制启动。"
-        "没有资产查询、远程控制和报修工具，不声称已检查设备或安排维修。"
+        "可通过 lookup_asset 查询公共演示资产资料；没有远程控制和报修工具，不声称已检查设备或安排维修。"
     )
+
+    def get_tools(self) -> Dict[str, AgentToolSpec]:
+        tools = super().get_tools()
+        tools.update(device_tools())
+        return tools
 
 
 class AccessAgent(BaseAgent):
@@ -686,6 +692,21 @@ class EscalationAgent(BaseAgent):
         else:
             sections.append("暂未提取到具体信息，请补充涉及的系统、问题现象或申请需求。")
         if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            asset_lookup = req.case_state.get("asset_lookup") or {}
+            if asset_lookup.get("source") == "demo":
+                asset_id = str(asset_lookup.get("asset_id") or "未提供有效编号")[:80]
+                if asset_lookup.get("status") == "found":
+                    asset_model = str((asset_lookup.get("asset") or {}).get("device_model") or "")[:120]
+                    asset_lines = [f"- 演示资产编号：{asset_id}", f"- 演示资料型号：{asset_model}",
+                                   "- 来源：lookup_asset 返回的公开虚构演示资料，不是用户陈述或真实资产核验结果。"]
+                    user_model = fields.get("device_model")
+                    if user_model and user_model.strip().lower() != asset_model.strip().lower():
+                        asset_lines.append("- 用户提供的设备型号与演示资料型号不一致，需由 IT 核对，不能用演示资料覆盖用户描述。")
+                else:
+                    status = "未找到该编号" if asset_lookup.get("status") == "not_found" else "本次查询不可用"
+                    asset_lines = [f"- 演示资产编号：{asset_id}", f"- 演示查询结果：{status}，没有可用型号资料。",
+                                   "- 来源：公开虚构演示资产查询，不代表真实企业资产状态。"]
+                sections.append("**演示资产资料（工具返回）**\n" + "\n".join(asset_lines))
             completed = [step for step in req.case_state.get("steps", [])
                          if step.get("status") == "user_reported_done"
                          and step.get("source") == "user_reported"
@@ -1037,7 +1058,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _merge_case_state(req, updates, traces, events):
-        from harness.state import apply_progress, new_case
+        from harness.state import apply_progress, apply_asset_lookup, new_case
         from harness.runtime import evidence_ids
         state = req.case_state or new_case(req.user_id, req.conv_id)
         topic_reset = False
@@ -1051,6 +1072,8 @@ class AgentOrchestrator:
                 topic_reset = topic_reset or bool(candidate.get("new_case"))
             except ValueError as ex:
                 events.append({"event": "state_update_rejected", "reason": str(ex)})
+        for trace in traces:
+            state = apply_asset_lookup(state, trace, req.request_id)
         return state
 
     async def _finalize_result(self, req: Request, result: OrchestratorResult) -> OrchestratorResult:

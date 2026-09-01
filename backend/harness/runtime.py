@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 async def run_agent(agent, req):
     from agents.agent_orchestrator import AgentCallResult, AgentCallError
     from harness.context import build_messages, harness_mode
-    from harness.state import PROGRESS_SCHEMA, PROGRESS_DESCRIPTION, apply_progress, new_case
+    from harness.state import PROGRESS_SCHEMA, PROGRESS_DESCRIPTION, apply_progress, apply_asset_lookup, new_case
     from agents.tools import AgentToolSpec
 
     mode = req.harness_mode or harness_mode()
@@ -112,6 +112,7 @@ async def run_agent(agent, req):
                 call_success = True
                 result_success: Optional[bool] = None
                 error_text = ""
+                tool_executed = False
                 if spec is None:
                     call_success = False
                     result: Any = {"success": False, "error": f"工具不在 {agent.agent_type.value} Agent 白名单中"}
@@ -129,6 +130,7 @@ async def run_agent(agent, req):
                         if mode == "enforce" and tool_count > tool_limit():
                             event("tool_blocked", tool_name=name, reason="tool_budget_exhausted")
                             raise ValueError("本轮工具调用预算已用完，请整理已有结果或说明待确认的信息")
+                        tool_executed = True
                         result = spec.handler(req, args)
                         if inspect.isawaitable(result):
                             result = await result
@@ -162,6 +164,17 @@ async def run_agent(agent, req):
                         "error": error_text,
                     }
                 )
+                if mode == "enforce" and name == "lookup_asset":
+                    trace = tool_traces[-1]
+                    if tool_executed and isinstance(result, dict):
+                        snapshot = {key: copy.deepcopy(result[key]) for key in
+                                    ("success", "source", "asset_id", "found") if key in result}
+                        if isinstance(result.get("asset"), dict):
+                            snapshot["asset"] = {key: copy.deepcopy(result["asset"][key]) for key in
+                                                 ("asset_id", "device_type", "device_model", "operating_system",
+                                                  "configuration", "warranty_until") if key in result["asset"]}
+                        trace["asset_lookup"] = snapshot
+                    local_state = apply_asset_lookup(local_state, trace, req.request_id)
                 event("tool_finished", tool_name=name, success=call_success,
                       result_success=result_success, error=error_text)
                 # 完整证据已在 results 中；trace 保留证据，模型只接收一份。

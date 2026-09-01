@@ -11,15 +11,19 @@ FACT_FIELDS = (
     "requested_access", "purpose", "operating_system", "client_version",
     "network_type", "impact_scope", "device_type", "device_model",
 )
+ASSET_FIELDS = ("asset_id", "device_type", "device_model", "operating_system",
+                "configuration", "warranty_until")
 STATUSES = ("collecting", "waiting_user", "handoff_ready", "resolved")
 CORRECTION = re.compile(r"说错|更正|改为|改成|不是.+是|实际是|纠正")
 NEW_TOPIC = re.compile(r"^\s*(?:(?:好[的吧]?|那|现在|我们|我想问|我要问|我想)[，,\s]*)?(?:换个问题|换一个问题|另一个问题|新的问题|重新开始)")
 PROGRESS_DESCRIPTION = (
     "记录当前 IT 问题的处理进度。只记录本轮用户明确提供的事实和操作结果，"
-    "事实值尽量使用原话；source_quote 必须逐字引用本轮用户消息，步骤引用应包含动作及结果。"
+    "事实值尽量使用原话；source_quote 必须逐字引用本轮用户消息，user_reported_done 步骤引用应包含动作及结果。"
     "result_quote 可单独引用同一句中的结果原文，结果未知可留空；建议执行不代表已经执行。"
     "已保存的事实不需重复提交，不得用历史消息冒充本轮来源。"
     "steps 只记用户实际操作或待执行建议，不记 Agent 自己的工具调用。"
+    "proposed 步骤只填 step_id、description、status，不带 source_quote、result 或 result_quote。"
+    "资产工具结果由后端独立保存，不要作为用户事实重复记录，也不能提交 asset_lookup。"
     "evidence_refs 只填检索实际返回的 chunk_id，不拼接标题。"
     "只在用户明确更正时设置 correction，明确换问题时设置 new_case。"
     "不要记录密码、验证码或密钥。此工具不创建工单、不执行授权或设备操作。"
@@ -58,7 +62,7 @@ def new_case(user_id, conv_id):
         "case_id": uuid.uuid4().hex[:12], "user_id": user_id, "conv_id": conv_id,
         "version": 0, "facts": {}, "steps": [], "evidence_refs": [],
         "pending_questions": [], "next_action": "", "status": "collecting",
-        "conflicts": [], "candidates": [], "progress_warnings": [],
+        "conflicts": [], "candidates": [], "progress_warnings": [], "asset_lookup": {},
     }
 
 
@@ -70,12 +74,59 @@ def prepare_case(case, user_message):
     if not NEW_TOPIC.search(user_message):
         continued = copy.deepcopy(case)
         continued.pop("new_topic", None)
+        asset_lookup = continued.get("asset_lookup") or {}
+        asset_id = str(asset_lookup.get("asset_id") or "").upper()
+        mentioned_ids = re.findall(r"(?<![A-Za-z0-9-])(?:NB|PC|PR)-\d+(?![A-Za-z0-9-])", user_message, re.I)
+        # Explicitly supplied unknown identifiers also invalidate the previous device.
+        mentioned_ids += re.findall(
+            r"资产编号\s*(?:[:：=]|更正为|修改为|调整为|改为|改成|是|为)\s*([A-Za-z0-9][A-Za-z0-9._-]*)",
+            user_message,
+        )
+        if asset_id and any(value.upper() != asset_id for value in mentioned_ids):
+            continued["asset_lookup"] = {}
         return continued
     replacement = new_case(case["user_id"], case["conv_id"])
     replacement["version"] = case.get("version", 0)
     replacement["new_topic"] = True
     replacement["isolate_history"] = True
     return replacement
+
+
+def apply_asset_lookup(case, trace, request_id):
+    """Copy only backend lookup results into a separate demo-asset snapshot."""
+    result = copy.deepcopy(case)
+    if not isinstance(trace, dict) or trace.get("tool_name") != "lookup_asset":
+        return result
+    inputs = trace.get("input") or {}
+    value = inputs.get("asset_id") if isinstance(inputs, dict) else None
+    asset_id = value.strip().upper() if isinstance(value, str) else ""
+    snapshot = {"asset_id": asset_id, "source": "demo", "status": "unavailable",
+                "asset": {}, "request_id": request_id}
+    # Every lookup attempt replaces the old asset, including schema/service failures.
+    result["asset_lookup"] = snapshot
+    payload = trace.get("asset_lookup")
+    if not isinstance(payload, dict):
+        return result
+    if (trace.get("success") is not True or trace.get("result_success") is not True
+            or payload.get("success") is not True or payload.get("source") != "demo"):
+        return result
+    returned_id = payload.get("asset_id")
+    if not asset_id or not isinstance(returned_id, str) or returned_id.strip().upper() != asset_id:
+        return result
+    if payload.get("found") is False:
+        snapshot["status"] = "not_found"
+        return result
+    asset = payload.get("asset")
+    if payload.get("found") is not True or not isinstance(asset, dict):
+        return result
+    if any(not isinstance(asset.get(field), str) or not asset[field].strip() for field in ASSET_FIELDS):
+        return result
+    if asset["asset_id"].strip().upper() != asset_id:
+        return result
+    snapshot["status"] = "found"
+    snapshot["asset"] = {field: asset[field] for field in ASSET_FIELDS}
+    snapshot["asset"]["asset_id"] = asset_id
+    return result
 
 
 def _text(value, name, limit=400, required=True):

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agents.agent_orchestrator import (
-    AgentOrchestrator, AgentType, DeviceAgent, EscalationAgent,
+    AccessAgent, AgentOrchestrator, AgentType, DeviceAgent, EscalationAgent, GeneralAgent,
     NetworkAgent, Request, TechnicalAgent, build_shared_rag_tools,
 )
 from core.intent_recognizer import IntentCategory, UrgencyLevel
@@ -91,8 +91,24 @@ def test_device_tools_exclude_software_network_diagnostics():
     for agent in (network, device):
         agent.set_shared_tools(shared)
     assert set(network.get_tools()) == {"search_knowledge_base", "lookup_error_code", "build_diagnostic_plan"}
-    assert set(device.get_tools()) == {"search_knowledge_base"}
+    assert set(device.get_tools()) == {"search_knowledge_base", "lookup_asset"}
+    assert device.profile.tool_scope == ("search_knowledge_base", "lookup_asset")
     assert network.profile.tool_scope == TechnicalAgent.profile.tool_scope
+
+
+@pytest.mark.parametrize("agent_class", [GeneralAgent, TechnicalAgent, NetworkAgent, AccessAgent, EscalationAgent])
+def test_asset_lookup_is_not_exposed_to_other_roles(agent_class):
+    class RagManager:
+        pass
+    shared = build_shared_rag_tools(RagManager())
+    device = DeviceAgent(None, "offline")
+    device.set_shared_tools(shared)
+    assert "lookup_asset" in device.get_tools()
+    assert "lookup_asset" not in shared
+    other = agent_class(None, "offline")
+    other.set_shared_tools(shared)
+    assert "lookup_asset" not in other.get_tools()
+    assert "lookup_asset" not in other.profile.tool_scope
 
 
 @pytest.mark.parametrize("kind,agent_class,intent", [
