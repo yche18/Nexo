@@ -16,10 +16,16 @@ functions; no new agent framework, model service or database is required.
 | `NEXO_HARNESS_VALIDATION_TIMEOUT=60` | Timeout for each added verification/repair request |
 
 Edit the local `.env`, then recreate the backend container to apply configuration.
-The existing three tool-interaction rounds per Agent and normal 600 second SDK
-timeout remain. If all three rounds end in tool use, enforce allows at most one
+The normal 600 second SDK timeout remains. Agents retain three tool-interaction
+rounds, except an enforce-mode primary Agent with ticket tools, which has up to
+five rounds. An earlier final answer ends the loop immediately; the existing
+12-tool cap is unchanged. When the available rounds end in tool use, enforce allows at most one
 additional answer-only call using the returned results, with tool_choice=none
-and SDK retries disabled. off/observe keep the original three-call limit. A qualifying answer adds at most one check, one repair and one recheck;
+and SDK retries disabled. Ticket-enabled answer-only calls use a separate
+summary instruction without active tool/Skills commands. Leaked DSML markup
+is rejected in returned text in all modes, never interpreted as executable tool calls;
+existing failure handling and committed receipt recovery remain in place.
+off/observe keep the original three-call limit. A qualifying answer adds at most one check, one repair and one recheck;
 the added calls disable automatic SDK retries. The same configured model serves
 business requests and the verifier. Evaluation Judge calls are separate.
 
