@@ -104,14 +104,20 @@ def test_repeated_document_import_is_idempotent():
     assert set(kb._collection.rows) == ids
 
 
-def test_default_corpus_keeps_original_ids_and_content():
+def test_default_corpus_preserves_unchanged_docs_and_updated_vpn_snapshot():
     kb = make_kb()
     kb._load_default_docs()
     path = Path(__file__).parents[1] / "evaluation/datasets/rag_support_v1.json"
     corpus = json.loads(path.read_text(encoding="utf-8"))["corpus"]
-    # The frozen evaluation corpus also contains one manually imported supplement.
-    # New domain documents may be added, but every original default must survive unchanged.
-    expected = {item["id"]: item for item in corpus if item["title"] != "权限申请补充规范"}
+    # Keep the historical evaluation corpus unchanged. Only the approved VPN
+    # revision uses the separately frozen current-document snapshot.
+    snapshot_path = Path(__file__).parent / "fixtures/default_knowledge_v2.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))["corpus"]
+    vpn = next(item for item in snapshot if item["title"] == "VPN 连接排查（演示资料）")
+    expected = {item["id"]: item for item in corpus
+                if item["title"] not in {"权限申请补充规范", vpn["title"]}}
+    assert len(expected) == 5
+    expected[vpn["id"]] = vpn
     assert len(expected) == 6
     for chunk_id, item in expected.items():
         content, meta = kb._collection.rows[chunk_id]

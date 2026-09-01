@@ -5,17 +5,18 @@ from pathlib import Path
 from test_knowledge_base import FakeKeywordStore, make_kb
 
 
-def test_added_domain_documents_preserve_original_frozen_corpus():
+def test_domain_documents_match_current_snapshot_and_reload_idempotently():
     kb = make_kb()
     kb._load_default_docs()
-    corpus_path = Path(__file__).parents[1] / "evaluation/datasets/rag_support_v1.json"
-    old_corpus = json.loads(corpus_path.read_text(encoding="utf-8"))["corpus"]
-    for old in old_corpus:
-        if old["title"] == "权限申请补充规范":
-            continue  # This is an evaluation-only supplement, not a startup default.
-        content, metadata = kb._collection.rows[old["id"]]
-        assert content == old["content"]
-        assert metadata["title"] == old["title"]
+    # Startup SOP revisions have their own snapshot; old eval labels stay frozen.
+    snapshot_path = Path(__file__).parent / "fixtures/default_knowledge_v2.json"
+    corpus = json.loads(snapshot_path.read_text(encoding="utf-8"))["corpus"]
+    assert len(corpus) == len(kb._collection.rows) == 10
+    for item in corpus:
+        content, metadata = kb._collection.rows[item["id"]]
+        assert content == item["content"]
+        assert metadata["title"] == item["title"]
+        assert metadata["chunk_index"] == item["chunk"]
         assert metadata["status"] == "ready"
     titles = {metadata["title"] for _, metadata in kb._collection.rows.values()}
     assert {
