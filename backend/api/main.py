@@ -228,6 +228,7 @@ async def lifespan(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         baseline_path=os.getenv("EVAL_BASELINE_PATH", "/app/data/eval/baseline.json"),
+        chat_runner=_evaluation_chat,
     )
 
     logger.info("Nexo 已就绪")
@@ -428,7 +429,7 @@ async def chat(req: ChatRequest):
 
 @app.get("/monitor")
 async def monitor_summary():
-    """实时监控摘要：Agent 成功率、工具统计、告警、优化建议。"""
+    """实时监控摘要：Agent 执行统计、RAG 检索工具统计、告警、优化建议。"""
     if _monitor is None:
         raise HTTPException(503, "服务未就绪")
     return _monitor.summary()
@@ -599,6 +600,12 @@ async def knowledge_stats():
     return {"total_chunks": await kb.doc_count_async()}
 
 
+async def _evaluation_chat(message: str, user_id: str, conv_id: str):
+    """评测使用独立身份，复用正常聊天的记忆、状态和实体流程。"""
+    response = await chat(ChatRequest(message=message, user_id=user_id, conv_id=conv_id))
+    return response.model_dump(mode="json")
+
+
 @app.post("/eval/run")
 async def run_eval(body: Optional[EvalRunInput] = None):
     """运行内置评测用例，返回评测报告。"""
@@ -631,6 +638,7 @@ async def run_eval(body: Optional[EvalRunInput] = None):
         dialog_cases=dialog_cases,
     )
     return {
+        "metadata":        report.metadata,
         "pass_rate":       report.pass_rate,
         "total":           report.total,
         "passed":          report.passed,

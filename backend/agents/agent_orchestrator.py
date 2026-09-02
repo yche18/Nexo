@@ -483,7 +483,7 @@ class DeviceAgent(BaseAgent):
         "先查询知识库，按适用设备 SOP 回答，信息不足时只询问本轮必要字段。"
         "不要把软件网络通用诊断流程套用到硬件故障；已明确的应用安装和崩溃由 Technical 处理，已明确的网络连接故障由 Network 处理。"
         "只提供安全的外部检查，不要求拆机、带电维修或反复强制启动。"
-        "可通过 lookup_asset 查询公共演示资产资料；没有远程控制和报修工具，不声称已检查设备或安排维修。"
+        "可通过 lookup_asset 查询公共演示资产资料；没有远程控制能力；可经用户确认登记报修工单，是否成功以工具回执为准，不声称已检查设备或安排维修。"
     )
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
@@ -986,7 +986,7 @@ class AgentOrchestrator:
         if not ticket_turn and self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
-                response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
+                response="我还不能确定您要处理的是哪类问题。请补充一下是账号权限、办公软件、网络连接，还是设备故障？",
                 agent_type=AgentType.GENERAL,
                 intent=req.intent,
                 escalated=False,
@@ -1499,15 +1499,22 @@ class AgentOrchestrator:
         deduped = list(dict.fromkeys(targets))
         return [agent_type for agent_type in deduped if self._pool.get(agent_type)]
 
-    @staticmethod
-    def _needs_clarification(req: Request) -> bool:
-        """低置信度且无明确意图时，先追问，避免误路由。"""
+    def _needs_clarification(self, req: Request) -> bool:
+        """低置信度且没有已有 IT 线索时，先追问，避免误路由。"""
         if req.intent != IntentCategory.OTHER:
             return False
         text = (req.message or "").strip()
         if len(text) <= 2:
             return False
-        return req.intent_confidence < 0.5
+        if req.intent_confidence < 0.5:
+            # 已知目标系统或领域线索时，继续原路由，不直接返回固定反问。
+            if (req.entities or {}).get("target_system"):
+                return False
+            for agent_type, score in self._domain_scores(req).items():
+                if agent_type != AgentType.GENERAL and score > 0:
+                    return False
+            return True
+        return False
 
     def _best_agent(self, agent_type: AgentType) -> Optional[BaseAgent]:
         """

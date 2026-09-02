@@ -171,7 +171,7 @@
 
               <div v-if="lastResponse" class="trace-body">
                 <div class="latency">
-                  <span>响应耗时</span>
+                  <span>编排耗时</span>
                   <strong>{{ lastResponse.latencyMs || '-' }}<small> ms</small></strong>
                 </div>
                 <dl class="detail-list">
@@ -218,7 +218,7 @@
                 <button class="link-button" @click="loadMonitor">刷新</button>
               </div>
               <div class="mini-stats">
-                <div><strong>{{ totalRequests }}</strong><span>请求</span></div>
+                <div><strong>{{ totalRequests }}</strong><span>Agent 执行次数</span></div>
                 <div><strong>{{ agentCount }}</strong><span>Agent</span></div>
                 <div><strong>{{ activeAlerts.length }}</strong><span>告警</span></div>
               </div>
@@ -302,16 +302,17 @@
 
       <div v-if="evalData" class="evaluation-content">
         <div class="evaluation-summary">
-          <div class="score-hero"><span>Pass rate</span><strong>{{ formatPercent(evalData.pass_rate) }}</strong><small>{{ evalData.passed }} / {{ evalData.total }} cases passed</small></div>
+          <div class="score-hero"><span>Pass rate</span><strong>{{ formatPercent(evalData.pass_rate) }}</strong><small>{{ evalData.passed }} / {{ evalData.total }} 评测项通过</small></div>
           <div><span>通过</span><strong>{{ evalData.passed }}</strong></div>
-          <div><span>总数</span><strong>{{ evalData.total }}</strong></div>
+          <div><span>评测项数</span><strong>{{ evalData.total }}</strong></div>
           <div><span>回归</span><strong :class="evalData.regressions?.length ? 'danger' : 'success'">{{ evalData.regressions?.length || 0 }}</strong></div>
         </div>
+        <p>意图识别作为一项汇总，多轮对话按轮计分。质量均分不包含无效评分。</p>
         <div class="evaluation-layout">
           <section class="workspace-card">
             <div class="card-heading"><div><span class="kicker">Scores</span><h2>平均评分</h2></div></div>
             <div class="score-list">
-              <div v-for="(value, key) in evalData.avg_scores" :key="key"><span>{{ key }}</span><i><b :style="{ width: `${Math.min(Number(value) * 10, 100)}%` }"></b></i><strong>{{ Number(value).toFixed(2) }}</strong></div>
+              <div v-for="(value, key) in evalData.avg_scores" :key="key"><span>{{ key }}</span><i><b :style="{ width: `${Math.max(0, Math.min(Number(value) * 100, 100))}%` }"></b></i><strong>{{ Number(value).toFixed(2) }}</strong></div>
             </div>
           </section>
           <section class="workspace-card">
@@ -320,6 +321,17 @@
             <div v-else class="workspace-empty">本次评测没有返回额外建议。</div>
           </section>
         </div>
+        <section class="workspace-card">
+          <div class="card-heading"><h2>逐项结果</h2></div>
+          <p v-if="evalData.metadata && !evalData.metadata.baseline_comparable">暂无同版本可比基线；回归为 0 不代表已经验证没有退化。</p>
+          <details v-for="result in evalData.results" :key="result.test_id" class="result-item" style="display: block">
+            <summary :class="result.passed ? 'success' : 'danger'">{{ result.test_id }} · {{ result.metadata?.judge_failed ? '评分无效' : (result.passed ? '通过' : '未通过') }} · {{ result.metadata?.question || '意图识别汇总' }}</summary>
+            <p>{{ result.detail }}</p>
+            <p v-if="result.metadata?.response" style="white-space: pre-wrap">{{ result.metadata.response }}</p>
+            <p v-for="(value, key) in result.scores" :key="key">{{ key }}: {{ Number(value).toFixed(2) }}</p>
+            <p v-for="(item, index) in result.metadata?.cases || []" :key="index">{{ item.message }} · 预期 {{ item.expected }} / 实际 {{ item.predicted }}</p>
+          </details>
+        </section>
       </div>
       <div v-else class="evaluation-empty"><div class="empty-symbol">◎</div><h2>还没有评测结果</h2><p>点击右上角运行一次评测。</p></div>
     </section>
