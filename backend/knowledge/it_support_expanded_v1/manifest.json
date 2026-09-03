@@ -1,0 +1,328 @@
+{
+  "version": "it-support-expanded-v1",
+  "manual_count": 32,
+  "import_units": 96,
+  "note": "32 source manuals, each with 3 independent sections imported using the existing document API. Section doc_ids are distinct to avoid overwriting other sections; section boundaries are preserved. Existing 8 manuals remain unchanged.",
+  "manuals": [
+    {
+      "id": "n01",
+      "title": "VPN 401：认证状态核对（演示手册）",
+      "file": "n01.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n01-scope",
+        "nexo-expanded-v1-n01-steps",
+        "nexo-expanded-v1-n01-verify"
+      ]
+    },
+    {
+      "id": "n02",
+      "title": "VPN 403：访问范围与授权（演示手册）",
+      "file": "n02.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n02-scope",
+        "nexo-expanded-v1-n02-steps",
+        "nexo-expanded-v1-n02-verify"
+      ]
+    },
+    {
+      "id": "n03",
+      "title": "VPN 超时：分层检查顺序（演示手册）",
+      "file": "n03.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n03-scope",
+        "nexo-expanded-v1-n03-steps",
+        "nexo-expanded-v1-n03-verify"
+      ]
+    },
+    {
+      "id": "n04",
+      "title": "内网 DNS：域名解析与访问条件（演示手册）",
+      "file": "n04.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n04-scope",
+        "nexo-expanded-v1-n04-steps",
+        "nexo-expanded-v1-n04-verify"
+      ]
+    },
+    {
+      "id": "n05",
+      "title": "VPN 已连接但单个内网服务不可达（演示手册）",
+      "file": "n05.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n05-scope",
+        "nexo-expanded-v1-n05-steps",
+        "nexo-expanded-v1-n05-verify"
+      ]
+    },
+    {
+      "id": "n06",
+      "title": "办公 Wi-Fi 与访客网络隔离（演示手册）",
+      "file": "n06.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n06-scope",
+        "nexo-expanded-v1-n06-steps",
+        "nexo-expanded-v1-n06-verify"
+      ]
+    },
+    {
+      "id": "n07",
+      "title": "有线连接：网线与扩展坞链路（演示手册）",
+      "file": "n07.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n07-scope",
+        "nexo-expanded-v1-n07-steps",
+        "nexo-expanded-v1-n07-verify"
+      ]
+    },
+    {
+      "id": "n08",
+      "title": "证书警告：安全入口核对（演示手册）",
+      "file": "n08.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n08-scope",
+        "nexo-expanded-v1-n08-steps",
+        "nexo-expanded-v1-n08-verify"
+      ]
+    },
+    {
+      "id": "n09",
+      "title": "代理 407：代理认证边界（演示手册）",
+      "file": "n09.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n09-scope",
+        "nexo-expanded-v1-n09-steps",
+        "nexo-expanded-v1-n09-verify"
+      ]
+    },
+    {
+      "id": "n10",
+      "title": "会议音视频卡顿：网络与应用分界（演示手册）",
+      "file": "n10.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n10-scope",
+        "nexo-expanded-v1-n10-steps",
+        "nexo-expanded-v1-n10-verify"
+      ]
+    },
+    {
+      "id": "n11",
+      "title": "忘记密码与账号锁定分流（演示手册）",
+      "file": "n11.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n11-scope",
+        "nexo-expanded-v1-n11-steps",
+        "nexo-expanded-v1-n11-verify"
+      ]
+    },
+    {
+      "id": "n12",
+      "title": "MFA 手机更换与恢复申请（演示手册）",
+      "file": "n12.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n12-scope",
+        "nexo-expanded-v1-n12-steps",
+        "nexo-expanded-v1-n12-verify"
+      ]
+    },
+    {
+      "id": "n13",
+      "title": "项目权限：只读与读写范围（演示手册）",
+      "file": "n13.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n13-scope",
+        "nexo-expanded-v1-n13-steps",
+        "nexo-expanded-v1-n13-verify"
+      ]
+    },
+    {
+      "id": "n14",
+      "title": "访问到期与权限续期（演示手册）",
+      "file": "n14.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n14-scope",
+        "nexo-expanded-v1-n14-steps",
+        "nexo-expanded-v1-n14-verify"
+      ]
+    },
+    {
+      "id": "n15",
+      "title": "批准通知与实际开通不一致（演示手册）",
+      "file": "n15.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n15-scope",
+        "nexo-expanded-v1-n15-steps",
+        "nexo-expanded-v1-n15-verify"
+      ]
+    },
+    {
+      "id": "n16",
+      "title": "岗位变更与离职访问回收（演示手册）",
+      "file": "n16.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n16-scope",
+        "nexo-expanded-v1-n16-steps",
+        "nexo-expanded-v1-n16-verify"
+      ]
+    },
+    {
+      "id": "n17",
+      "title": "Windows 安装失败 1603（演示手册）",
+      "file": "n17.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n17-scope",
+        "nexo-expanded-v1-n17-steps",
+        "nexo-expanded-v1-n17-verify"
+      ]
+    },
+    {
+      "id": "n18",
+      "title": "macOS 软件来源校验与安装限制（演示手册）",
+      "file": "n18.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n18-scope",
+        "nexo-expanded-v1-n18-steps",
+        "nexo-expanded-v1-n18-verify"
+      ]
+    },
+    {
+      "id": "n19",
+      "title": "办公软件激活与许可证核验（演示手册）",
+      "file": "n19.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n19-scope",
+        "nexo-expanded-v1-n19-steps",
+        "nexo-expanded-v1-n19-verify"
+      ]
+    },
+    {
+      "id": "n20",
+      "title": "应用闪退：保存数据与安全排查（演示手册）",
+      "file": "n20.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n20-scope",
+        "nexo-expanded-v1-n20-steps",
+        "nexo-expanded-v1-n20-verify"
+      ]
+    },
+    {
+      "id": "n21",
+      "title": "浏览器 403 与项目角色核对（演示手册）",
+      "file": "n21.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n21-scope",
+        "nexo-expanded-v1-n21-steps",
+        "nexo-expanded-v1-n21-verify"
+      ]
+    },
+    {
+      "id": "n22",
+      "title": "文件同步冲突与版本保留（演示手册）",
+      "file": "n22.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n22-scope",
+        "nexo-expanded-v1-n22-steps",
+        "nexo-expanded-v1-n22-verify"
+      ]
+    },
+    {
+      "id": "n23",
+      "title": "网页 500：请求链路与日志交接（演示手册）",
+      "file": "n23.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n23-scope",
+        "nexo-expanded-v1-n23-steps",
+        "nexo-expanded-v1-n23-verify"
+      ]
+    },
+    {
+      "id": "n24",
+      "title": "单页面缓慢与影响范围确认（演示手册）",
+      "file": "n24.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n24-scope",
+        "nexo-expanded-v1-n24-steps",
+        "nexo-expanded-v1-n24-verify"
+      ]
+    },
+    {
+      "id": "n25",
+      "title": "软件升级与回退条件（演示手册）",
+      "file": "n25.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n25-scope",
+        "nexo-expanded-v1-n25-steps",
+        "nexo-expanded-v1-n25-verify"
+      ]
+    },
+    {
+      "id": "n26",
+      "title": "邮件附件隔离与安全拦截（演示手册）",
+      "file": "n26.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n26-scope",
+        "nexo-expanded-v1-n26-steps",
+        "nexo-expanded-v1-n26-verify"
+      ]
+    },
+    {
+      "id": "n27",
+      "title": "无法开机与开机黑屏分界（演示手册）",
+      "file": "n27.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n27-scope",
+        "nexo-expanded-v1-n27-steps",
+        "nexo-expanded-v1-n27-verify"
+      ]
+    },
+    {
+      "id": "n28",
+      "title": "外接显示器与扩展坞显示异常（演示手册）",
+      "file": "n28.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n28-scope",
+        "nexo-expanded-v1-n28-steps",
+        "nexo-expanded-v1-n28-verify"
+      ]
+    },
+    {
+      "id": "n29",
+      "title": "打印机离线与共享任务边界（演示手册）",
+      "file": "n29.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n29-scope",
+        "nexo-expanded-v1-n29-steps",
+        "nexo-expanded-v1-n29-verify"
+      ]
+    },
+    {
+      "id": "n30",
+      "title": "打印机卡纸与高温部件安全（演示手册）",
+      "file": "n30.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n30-scope",
+        "nexo-expanded-v1-n30-steps",
+        "nexo-expanded-v1-n30-verify"
+      ]
+    },
+    {
+      "id": "n31",
+      "title": "电池鼓包、进液与异常发热（演示手册）",
+      "file": "n31.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n31-scope",
+        "nexo-expanded-v1-n31-steps",
+        "nexo-expanded-v1-n31-verify"
+      ]
+    },
+    {
+      "id": "n32",
+      "title": "资产编号查询与维修资格区分（演示手册）",
+      "file": "n32.md",
+      "section_doc_ids": [
+        "nexo-expanded-v1-n32-scope",
+        "nexo-expanded-v1-n32-steps",
+        "nexo-expanded-v1-n32-verify"
+      ]
+    }
+  ]
+}
