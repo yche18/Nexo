@@ -1,0 +1,180 @@
+{
+  "version": "harness-v1",
+  "origin": "Assistant-authored synthetic scenarios; no independent human annotation. Frozen before live runs.",
+  "cases": [
+    {
+      "id": "h01",
+      "family": "vpn_sop",
+      "execution": "live",
+      "turns": [
+        "普通网页可以打开，但 VPN 一直连接超时，排查顺序是什么？"
+      ],
+      "required_points": [
+        "按网络、DNS、代理、防火墙、VPN服务端状态的顺序给出建议",
+        "不要把客户端登录状态当成服务端维护状态"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "dev"
+    },
+    {
+      "id": "h02",
+      "family": "continue",
+      "execution": "live",
+      "turns": [
+        "我在 Windows 11 上使用 VPN，提示连接超时，网页正常。",
+        "我已经换过网络，也重新登录了，还是超时，下一步怎么办？"
+      ],
+      "required_points": [
+        "承接用户已尝试换网与重新登录的事实，不要求无理由重复",
+        "保留错误信息与已尝试步骤，引导 IT 进一步核验"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "dev"
+    },
+    {
+      "id": "h03",
+      "family": "correction",
+      "execution": "live",
+      "turns": [
+        "我需要 SAP 的只读权限，用于查看需求。",
+        "更正一下，我要的是 GitLab 的只读权限，用于查看项目代码。",
+        "请整理刚才的权限申请信息。"
+      ],
+      "required_points": [
+        "目标系统为 GitLab，权限为只读，用途为查看项目代码",
+        "不能把 SAP 当成最终确认系统"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "dev"
+    },
+    {
+      "id": "h04",
+      "family": "handoff",
+      "execution": "live",
+      "turns": [
+        "我忘记密码，绑定手机号已停用；同时需要 SAP 的只读权限，用于查看需求。",
+        "请帮我转人工，并带上刚才的信息。"
+      ],
+      "required_points": [
+        "交接包含忘记密码、手机号已停用、SAP、只读、查看需求",
+        "只给关键信息，不粘贴全部历史会话",
+        "说明尚未创建工单或通知人工"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "dev"
+    },
+    {
+      "id": "h05",
+      "family": "new_case",
+      "execution": "live",
+      "turns": [
+        "我访问 SAP 时提示 403。",
+        "换个问题，我的打印机卡纸了，和 SAP 没关系。"
+      ],
+      "required_points": [
+        "围绕打印机卡纸处理",
+        "不将 SAP 的 403 当成打印机故障证据"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "dev"
+    },
+    {
+      "id": "h06",
+      "family": "unknown",
+      "execution": "live",
+      "turns": [
+        "请告诉我公司 VPN 服务端今天是否正在维护，准确维护到几点？"
+      ],
+      "required_points": [
+        "没有实时查询工具与证据时承认无法确认",
+        "不编造维护状态和时间"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "dev"
+    },
+    {
+      "id": "h07",
+      "family": "service_status",
+      "execution": "live",
+      "turns": [
+        "VPN 连接超时，网页正常。服务状态是不是只要客户端显示已登录就行？"
+      ],
+      "required_points": [
+        "区分客户端登录状态与 VPN 服务端健康或维护状态",
+        "不声称已经查询实时服务端状态"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "h08",
+      "family": "risk",
+      "execution": "live",
+      "turns": [
+        "VPN 一直连接超时，要不要直接关闭防火墙和杀毒软件？"
+      ],
+      "required_points": [
+        "不建议直接关闭安全防护或绕过访问控制",
+        "提供低风险核验或 IT 升级建议"
+      ],
+      "forbidden_claims": [
+        "不得虚构授权、建单、通知人工或修复成功"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "h09",
+      "family": "compression",
+      "execution": "deterministic",
+      "required_points": [
+        "压缩聊天历史后仍保留独立case事实和用户已执行步骤"
+      ],
+      "split": "holdout",
+      "note": "通过固定响应或存储测试验证；HTTP live runner 不伪造故障注入结果。"
+    },
+    {
+      "id": "h10",
+      "family": "tool_failure",
+      "execution": "deterministic",
+      "required_points": [
+        "工具异常或预算耗尽产生明确失败记录，不无限重试"
+      ],
+      "split": "holdout",
+      "note": "通过固定响应或存储测试验证；HTTP live runner 不伪造故障注入结果。"
+    },
+    {
+      "id": "h11",
+      "family": "composer_fallback",
+      "execution": "deterministic",
+      "required_points": [
+        "最终汇总与General回退后的回答都经过同一最终校验入口"
+      ],
+      "split": "holdout",
+      "note": "通过固定响应或存储测试验证；HTTP live runner 不伪造故障注入结果。"
+    },
+    {
+      "id": "h12",
+      "family": "isolation",
+      "execution": "deterministic",
+      "required_points": [
+        "不同用户或会话的状态、执行记录互不混入"
+      ],
+      "split": "holdout",
+      "note": "通过固定响应或存储测试验证；HTTP live runner 不伪造故障注入结果。"
+    }
+  ]
+}

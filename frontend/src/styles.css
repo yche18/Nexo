@@ -118,6 +118,11 @@ a { color: inherit; }
   overflow: visible;
 }
 
+.app-shell-evaluation {
+  height: 100vh;
+  overflow-y: auto;
+}
+
 .topbar {
   position: sticky;
   top: 0;

@@ -82,7 +82,7 @@ def test_escalation_agent_is_a_real_non_llm_handoff_node():
 
     assert result.success is True
     assert result.escalate is True
-    assert "标记为 IT 人工处理" in result.content
+    assert "待人工处理" in result.content
     assert client.calls == []
 
 
@@ -328,6 +328,8 @@ def test_three_entity_bonuses_match_original_weights_and_only_apply_once():
         AgentType.GENERAL: round(baseline[AgentType.GENERAL] + 0.1, 3),
         AgentType.TECHNICAL: round(baseline[AgentType.TECHNICAL] + 0.2, 3),
         AgentType.ACCESS: round(baseline[AgentType.ACCESS] + 0.15, 3),
+        AgentType.NETWORK: 0.0,
+        AgentType.DEVICE: 0.0,
     }
 
 
@@ -366,7 +368,7 @@ def test_handoff_displays_known_it_fields_without_empty_json():
     assert "错误码：401" in response.content
     assert "发生时间：" not in response.content
     assert "[]" not in response.content
-    assert "尚未创建工单或通知 IT 人员" in response.content
+    assert "待人工处理" in response.content
     assert client.calls == []
 
 
@@ -488,8 +490,8 @@ def test_handoff_preserves_collected_information_with_empty_current_entities():
         "- 目标系统", "- 问题现象", "- 发生时间", "- 错误码", "- 申请权限", "- 申请用途",
     } for line in field_lines)
     assert "暂未提取到具体信息" not in result.content
-    assert result.content.startswith("我已将您的问题标记为 IT 人工处理。")
-    assert "尚未创建工单或通知 IT 人员" in result.content
+    assert result.content.startswith("已整理您的问题和相关信息，当前待人工处理。")
+    assert "待人工处理" in result.content
     assert req == before
     assert result.escalate and result.success
     assert result.tools_used == []

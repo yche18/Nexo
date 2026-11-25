@@ -32,6 +32,23 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  elasticsearch:
+    build: ./config/elasticsearch
+    ports:
+      - "127.0.0.1:${ELASTICSEARCH_EXTERNAL_PORT:-19200}:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     ports:
@@ -62,14 +79,17 @@ services:
       - .env
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD:-nexo-local-password}@redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
       CHROMA_PERSIST_DIRECTORY: /app/data/chroma
       EVAL_BASELINE_PATH: /app/data/eval/baseline.json
       NEXO_SKILLS_DIR: /app/skills
+      NEXO_TICKET_DB_PATH: /app/data/tickets/tickets.sqlite3
     volumes:
       - ./data/chroma:/app/data/chroma
       - ./data/eval:/app/data/eval
+      - ticket-data:/app/data/tickets
       - ./backend/skills:/app/skills
       - ./logs:/app/logs
     depends_on:
@@ -126,3 +146,5 @@ volumes:
   chromadb-data:
   prometheus-data:
   nginx-logs:
+  elasticsearch-data:
+  ticket-data:

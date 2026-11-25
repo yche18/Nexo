@@ -14,6 +14,7 @@ ChromaDB 在这里的角色：
 import asyncio
 import hashlib
 import logging
+import json
 from typing import Any, Dict, List, Optional
 
 import chromadb
@@ -37,6 +38,9 @@ class KnowledgeBase:
         chroma_host: str = "localhost",
         chroma_port: int = 8000,
         chroma_path: str = "./data/chroma",
+        keyword_store=None,
+        allow_local_fallback=True,
+        seed_defaults=True,
     ):
         # 优先连接独立 ChromaDB 服务（服务端内置 embedding 模型，客户端无需下载）
         self._use_server = False
@@ -51,6 +55,8 @@ class KnowledgeBase:
             self._use_server = True
             logger.info(f"知识库 ChromaDB 已连接: {chroma_host}:{chroma_port}")
         except Exception:
+            if not allow_local_fallback:
+                raise
             logger.info(f"知识库 ChromaDB 服务不可用，使用本地模式: {chroma_path}")
             self._client = chromadb.PersistentClient(
                 path=chroma_path,
@@ -64,124 +70,326 @@ class KnowledgeBase:
             metadata={"description": "Nexo RAG 知识库"},
         )
 
+        self._keyword_store = None
+        self._import_lock = asyncio.Lock()
+
         # 如果知识库为空，导入默认文档
-        if self._collection.count() == 0:
+        self._seeded_default_docs = False
+        if seed_defaults and self._collection.count() == 0:
             self._load_default_docs()
+            self._seeded_default_docs = True
+
+        self._keyword_store = keyword_store
+        self._legacy_metadata = {
+            item["chunk_id"]: dict(item, status="legacy")
+            for item in self._legacy_updates(self._read_chunks())
+        }
+        if self._legacy_metadata:
+            logger.warning("知识库含旧版元数据：暂用只读向量检索，请显式运行重建脚本完成迁移")
 
     # ── 文档管理 ──────────────────────────────────────────────────────────────
 
-    def add_documents(self, documents: List[Dict[str, str]]) -> int:
-        """
-        批量导入文档到知识库。
-
-        documents 格式: [{"title": "...", "content": "..."}, ...]
-        长文档会自动切片（每片 500 字）。
-        """
-        ids, docs, metas = [], [], []
-
-        for doc in documents:
-            title   = doc.get("title", "")
-            content = doc.get("content", "")
-            chunks  = self._chunk_text(content, chunk_size=500)
-
-            for i, chunk in enumerate(chunks):
-                doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
-                ids.append(doc_id)
-                docs.append(chunk)
-                metas.append({"title": title, "chunk_index": i, "total_chunks": len(chunks)})
-
-        if ids:
-            # ID 由文档内容稳定生成；upsert 使重复导入幂等，同时允许同 ID 内容更新。
-            # ChromaDB 会自动生成或更新 Embedding。
-            self._collection.upsert(ids=ids, documents=docs, metadatas=metas)
-            logger.info(f"知识库写入 {len(ids)} 个文档片段")
-
-        return len(ids)
-
-    async def add_documents_async(self, documents: List[Dict[str, str]]) -> int:
-        """异步导入文档；ChromaDB 客户端为同步实现，因此放入线程池执行。"""
-        return await asyncio.to_thread(self.add_documents, documents)
-
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """
-        语义检索：根据 query 返回最相关的文档片段。
-
-        ChromaDB 内部自动将 query 转为向量，与存储的文档向量做余弦相似度匹配。
-        """
-        results = self._collection.query(
-            query_texts=[query],
-            n_results=top_k,
-        )
-
+    def _prepare_document(self, document, preserve_legacy_ids=False):
+        title = document.get("title", "")
+        content = document.get("content", "")
+        source = document.get("source", "")
+        section = document.get("section", "")
+        doc_id = document.get("doc_id") or hashlib.sha256(
+            f"{title}\n{source}".encode()
+        ).hexdigest()[:24]
+        chunks = self._chunk_text(content, chunk_size=500)
+        version_text = json.dumps([title, source, section, chunks], ensure_ascii=False)
+        doc_version = hashlib.sha256(version_text.encode()).hexdigest()[:24]
         items = []
-        if results["documents"] and results["documents"][0]:
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            ):
-                items.append({
-                    "title":    meta.get("title", ""),
-                    "content":  doc,
-                    "score":    round(1.0 - dist, 4),  # ChromaDB 返回距离，转为相似度
-                    "chunk":    meta.get("chunk_index", 0),
-                })
-
+        for index, content in enumerate(chunks):
+            if preserve_legacy_ids:
+                chunk_id = hashlib.md5(f"{title}_{index}_{content[:50]}".encode()).hexdigest()
+            else:
+                chunk_id = hashlib.sha256(
+                    f"{doc_id}:{doc_version}:{index}".encode()
+                ).hexdigest()
+            items.append({
+                "doc_id": doc_id, "doc_version": doc_version, "chunk_id": chunk_id,
+                "chunk_index": index, "total_chunks": len(chunks), "title": title,
+                "source": source, "section": section, "content": content, "status": "pending",
+            })
         return items
 
+    def _upsert_chunks(self, chunks):
+        if not chunks:
+            return
+        self._collection.upsert(
+            ids=[item["chunk_id"] for item in chunks],
+            documents=[item["content"] for item in chunks],
+            metadatas=[self._metadata(item) for item in chunks],
+        )
+
+    @staticmethod
+    def _metadata(item):
+        keys = ("doc_id", "doc_version", "chunk_id", "chunk_index", "total_chunks",
+                "title", "source", "section", "status")
+        return {key: item[key] for key in keys}
+
+    def _read_chunks(self, **kwargs):
+        result = self._collection.get(include=["documents", "metadatas"], **kwargs)
+        items = []
+        for chunk_id, content, meta in zip(
+            result["ids"], result["documents"], result["metadatas"]
+        ):
+            item = dict(meta or {})
+            item.update(chunk_id=chunk_id, content=content)
+            items.append(item)
+        return items
+
+    def add_documents(self, documents: List[Dict[str, str]], preserve_legacy_ids=False) -> int:
+        """同步写入用于无关键词库的场景；双库导入使用 add_documents_async。"""
+        if getattr(self, "_legacy_metadata", {}):
+            raise RuntimeError("旧知识库仍可检索；导入新版前请先显式迁移元数据")
+        if getattr(self, "_keyword_store", None) is not None:
+            raise RuntimeError("双库导入请使用 add_documents_async")
+        total = 0
+        for document in documents:
+            chunks = self._prepare_document(document, preserve_legacy_ids)
+            if not chunks:
+                continue
+            previous = self._read_chunks(where={"doc_id": chunks[0]["doc_id"]})
+            same_version = {item["chunk_index"]: item for item in previous
+                            if item["doc_version"] == chunks[0]["doc_version"]}
+            for item in chunks:
+                item["status"] = "ready"
+                if item["chunk_index"] in same_version:
+                    item["chunk_id"] = same_version[item["chunk_index"]]["chunk_id"]
+            # 同一批次更新旧版状态与新版，检索只读取 ready。
+            retired = []
+            for item in previous:
+                if item["doc_version"] != chunks[0]["doc_version"]:
+                    retired.append(dict(item, status="retired"))
+            self._upsert_chunks(retired + chunks)
+            total += len(chunks)
+        return total
+
+    async def add_documents_async(self, documents: List[Dict[str, str]]) -> int:
+        """先写 pending，ES 成功后发布；失败可用相同输入重试，不视为跨库事务。"""
+        if getattr(self, "_legacy_metadata", {}):
+            raise RuntimeError("旧知识库仍可检索；导入新版前请先显式迁移元数据")
+        if self._keyword_store is None:
+            return await asyncio.to_thread(self.add_documents, documents)
+        async with self._import_lock:
+            total = 0
+            for document in documents:
+                chunks = self._prepare_document(document)
+                if not chunks:
+                    continue
+                doc_id = chunks[0]["doc_id"]
+                version = chunks[0]["doc_version"]
+                previous = await asyncio.to_thread(self._read_chunks, where={"doc_id": doc_id})
+                same_version = {item["chunk_index"]: item for item in previous
+                                if item["doc_version"] == version and item["status"] == "ready"}
+                # 元数据迁移后，重复导入仍沿用旧 chunk ID。
+                for item in chunks:
+                    if item["chunk_index"] in same_version:
+                        item["chunk_id"] = same_version[item["chunk_index"]]["chunk_id"]
+                already_ready = len(same_version) == len(chunks)
+                ready = [dict(item, status="ready") for item in chunks]
+                retired = [dict(item, status="retired") for item in previous
+                           if item["doc_version"] != version]
+                if not already_ready:
+                    await asyncio.to_thread(self._upsert_chunks, chunks)
+                    await self._keyword_store.index_chunks(chunks)
+                # ES 提前 ready 的短暂窗口由 keyword_search_handler 的 Chroma 状态校验隔离。
+                await self._keyword_store.index_chunks(ready)
+                if not already_ready:
+                    updates = retired + ready
+                    try:
+                        await asyncio.to_thread(
+                            self._collection.update,
+                            ids=[item["chunk_id"] for item in updates],
+                            metadatas=[self._metadata(item) for item in updates],
+                        )
+                    except Exception:
+                        # 恢复旧版可见状态，新版保留 pending，便于重试。
+                        rollback = previous + [item for item in chunks
+                                               if item["chunk_id"] not in {old["chunk_id"] for old in previous}]
+                        await asyncio.to_thread(
+                            self._collection.update,
+                            ids=[item["chunk_id"] for item in rollback],
+                            metadatas=[self._metadata(item) for item in rollback],
+                        )
+                        raise
+                old_versions = {item["doc_version"] for item in retired}
+                for old_version in old_versions:
+                    await self._keyword_store.delete_document_chunks(doc_id, old_version)
+                total += len(chunks)
+            return total
+
+    def _legacy_updates(self, chunks):
+        """构造旧切片元数据，不修改数据库。"""
+        groups = {}
+        for item in chunks:
+            if "doc_version" not in item:
+                key = (item.get("title", ""), item.get("source", ""))
+                groups.setdefault(key, []).append(item)
+        changed = []
+        for (title, source), items in groups.items():
+            items.sort(key=lambda item: item.get("chunk_index", 0))
+            indexes = [item.get("chunk_index", 0) for item in items]
+            if len(set(indexes)) != len(indexes):
+                raise ValueError(f"旧文档 {title!r} 有重复 chunk_index，请确认版本后再迁移")
+            doc_id = hashlib.sha256(f"{title}\n{source}".encode()).hexdigest()[:24]
+            content = [item["content"] for item in items]
+            version_text = json.dumps([title, source, "", content], ensure_ascii=False)
+            version = hashlib.sha256(version_text.encode()).hexdigest()[:24]
+            for item in items:
+                item.update(doc_id=doc_id, doc_version=version, title=title,
+                            source=source, section=item.get("section", ""), status="ready",
+                            chunk_index=item.get("chunk_index", 0), total_chunks=len(items))
+                changed.append(item)
+        return changed
+
+    def migrate_legacy_metadata(self) -> int:
+        """显式补齐旧知识库元数据，保留原 ID、文本及切片边界，不访问记忆集合。"""
+        changed = self._legacy_updates(self._read_chunks())
+        if changed:
+            self._collection.update(
+                ids=[item["chunk_id"] for item in changed],
+                metadatas=[self._metadata(item) for item in changed],
+            )
+        self._legacy_metadata = {}
+        return len(changed)
+
+    async def initialize_keyword_index(self):
+        """新索引/新种子或空索引恢复时补建；旧元数据仍要求显式迁移。"""
+        if self._keyword_store is None:
+            return
+        created = await self._keyword_store.ensure_index()
+        if self._legacy_metadata:
+            logger.warning("Elasticsearch 尚未同步旧知识切片，请运行显式迁移重建脚本")
+            return
+        empty = await self._keyword_store.count_ready() == 0
+        if created or getattr(self, "_seeded_default_docs", False) or (empty and self.doc_count):
+            await self.rebuild_keyword_index()
+
+    async def rebuild_keyword_index(self) -> int:
+        """显式重建 ready 知识切片的关键词索引，可重复执行。"""
+        if self._keyword_store is None:
+            raise RuntimeError("未配置 Elasticsearch")
+        async with self._import_lock:
+            await self._keyword_store.ensure_index()
+            chunks = await asyncio.to_thread(self._read_chunks)
+            if any("doc_version" not in item for item in chunks):
+                raise ValueError("旧知识库缺少元数据，请先执行 migrate_legacy_metadata")
+            ready = [item for item in chunks if item["status"] == "ready"]
+            await self._keyword_store.index_chunks(ready)
+            for item in chunks:
+                if item["status"] != "ready":
+                    await self._keyword_store.delete_document_chunks(item["doc_id"], item["doc_version"])
+            return len(ready)
+
+    @staticmethod
+    def _candidate(item, score=0.0, channel="vector"):
+        result = dict(item)
+        result.update(score=score, chunk=item["chunk_index"], channel=channel)
+        return result
+
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """只检索已发布知识切片；保留原 Chroma 距离到 score 的计算方式。"""
+        if top_k <= 0 or self._collection.count() == 0:
+            return []
+        legacy = getattr(self, "_legacy_metadata", {})
+        kwargs = {"where": {"status": "ready"}}
+        count = min(top_k, self._collection.count())
+        if legacy:
+            # 仅迁移前兼容旧记录；pending/retired 仍在下面过滤。
+            kwargs = {}
+            count = self._collection.count()
+        results = self._collection.query(query_texts=[query], n_results=count, **kwargs)
+        items = []
+        for chunk_id, content, meta, distance in zip(
+            results["ids"][0], results["documents"][0],
+            results["metadatas"][0], results["distances"][0],
+        ):
+            item = dict(meta)
+            if "doc_version" not in item and chunk_id in legacy:
+                item = dict(legacy[chunk_id])
+            if item.get("status") not in ("ready", "legacy"):
+                continue
+            item.update(chunk_id=chunk_id, content=content)
+            items.append(self._candidate(item, round(1.0 - distance, 4)))
+        return items[:top_k]
+
     async def search_async(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """异步检索；ChromaDB 客户端为同步实现，因此放入线程池执行。"""
         return await asyncio.to_thread(self.search, query, top_k)
 
     @property
     def doc_count(self) -> int:
-        return self._collection.count()
+        ready = self._collection.get(where={"status": "ready"}, include=[])["ids"]
+        return len(set(ready) | set(getattr(self, "_legacy_metadata", {})))
 
     async def doc_count_async(self) -> int:
-        """异步获取文档片段数量。"""
-        return await asyncio.to_thread(self._collection.count)
-
-    # ── MCP 工具 handler ─────────────────────────────────────────────────────
+        return await asyncio.to_thread(lambda: self.doc_count)
 
     async def search_handler(self, params: Dict[str, Any], context: Any) -> List[Dict]:
-        """
-        作为 MCP 工具的 handler 注册。
+        return await self.search_async(params.get("query", ""), params.get("top_k", 5))
 
-        MCPToolManager.register(Tool(
-            name="knowledge_search",
-            handler=kb.search_handler,
-            ...
-        ))
-        """
-        query = params.get("query", "")
+    async def keyword_search_handler(self, params: Dict[str, Any], context: Any) -> List[Dict]:
+        if self._keyword_store is None:
+            raise RuntimeError("未配置 Elasticsearch")
         top_k = params.get("top_k", 5)
-        return await self.search_async(query, top_k=top_k)
+        if top_k <= 0:
+            return []
+        items = await self._keyword_store.search(params.get("query", ""), top_k * 3)
+        if not items:
+            return []
+        published = await asyncio.to_thread(
+            self._read_chunks, ids=[item["chunk_id"] for item in items], where={"status": "ready"}
+        )
+        valid = {item["chunk_id"]: item for item in published}
+        result = []
+        for item in items:
+            current = valid.get(item["chunk_id"])
+            if current and current["doc_version"] == item["doc_version"]:
+                # 正文与元数据以 Chroma 已发布版本为准，ES 只提供排序。
+                result.append(self._candidate(current, item["score"], "keyword"))
+        return result[:top_k]
 
-    # ── 内部方法 ──────────────────────────────────────────────────────────────
+    async def get_neighbors_async(self, item, window=1):
+        """返回同文档、版本、章节的 ready 邻接切片（包含命中切片），按序排列。"""
+        where = {"$and": [
+            {"doc_id": item["doc_id"]}, {"doc_version": item["doc_version"]},
+            {"section": item.get("section", "")}, {"status": "ready"},
+        ]}
+        chunks = await asyncio.to_thread(self._read_chunks, where=where)
+        neighbors = []
+        for chunk in chunks:
+            if abs(chunk["chunk_index"] - item["chunk_index"]) <= max(0, window):
+                neighbors.append(self._candidate(chunk))
+        return sorted(neighbors, key=lambda chunk: chunk["chunk_index"])
 
     def _chunk_text(self, text: str, chunk_size: int = 500) -> List[str]:
-        """将长文本按 chunk_size 切片，保留语义完整性（按句号/换行切分）。"""
+        """保留原按句号/换行切片；单句超长时按长度兜底，避免超过上限。"""
         if len(text) <= chunk_size:
             return [text] if text.strip() else []
-
         chunks = []
         current = ""
-        # 按句子切分
-        sentences = text.replace("\n", "。").split("。")
-        for sent in sentences:
-            sent = sent.strip()
-            if not sent:
+        for sentence in text.replace("\n", "。").split("。"):
+            sentence = sentence.strip()
+            if not sentence:
                 continue
-            if len(current) + len(sent) + 1 > chunk_size:
+            if len(sentence) > chunk_size:
                 if current:
                     chunks.append(current)
-                current = sent
+                    current = ""
+                while len(sentence) > chunk_size:
+                    chunks.append(sentence[:chunk_size])
+                    sentence = sentence[chunk_size:]
+            if len(current) + len(sentence) + 1 > chunk_size:
+                if current:
+                    chunks.append(current)
+                current = sentence
             else:
-                current = f"{current}。{sent}" if current else sent
-
+                current = f"{current}。{sentence}" if current else sentence
         if current:
             chunks.append(current)
-
         return chunks
 
     def _load_default_docs(self) -> None:
@@ -191,11 +399,16 @@ class KnowledgeBase:
                 "title": "VPN 连接排查（演示资料）",
                 "content": (
                     "以下为模拟企业 IT 资料。"
-                    "VPN 连接失败时，先确认普通网页能否访问，区分基础网络故障和 VPN 连接问题。"
                     "记录操作系统、VPN 客户端版本、错误提示、发生时间和是否持续复现。"
-                    "401 通常表示认证失败，可检查登录状态、是否使用正确入口，以及认证信息是否过期。"
                     "连接超时时，按网络、DNS、代理、防火墙和服务状态顺序排查，不直接断定根因。"
-                    "如果切换网络或重新登录后仍失败，保留错误信息和已尝试的步骤，联系 IT 人员继续核验。"
+                    "网络：确认普通网页能否访问，在企业允许时用另一网络对比。"
+                    "DNS：按企业指引核对 VPN 域名能否正常解析，无法确认时请 IT 核验解析结果。"
+                    "代理：核对系统与 VPN 客户端代理是否符合企业配置，不自行绕过代理策略。"
+                    "防火墙：请 IT 核验 VPN 连接是否被防火墙或安全软件策略拦截，不建议关闭防护。"
+                    "服务状态：查看企业故障或维护公告，或请 IT 确认 VPN 服务端是否故障、维护；重新登录不能替代此项核验。"
+                    "401 可另查登录状态、正确入口和认证是否过期，不把认证检查当作服务状态检查。"
+                    "已换网或重新登录仍失败时，保留结果并继续尚未完成的检查，不重复已完成步骤，也不直接跳过剩余项。"
+                    "仍无法解决或需内部权限核验时，整理错误信息、已尝试步骤及待核验项供 IT 接手。"
                     "不要发送密码、验证码或完整密钥，不绕过认证和网络访问限制。"
                 ),
             },
@@ -208,7 +421,7 @@ class KnowledgeBase:
                     "由负责人确认业务需要，再由 IT 按企业审批流程处理；"
                     "具体入口、所需材料和时效以实际 IT 规范为准。"
                     "Nexo 只检查目标系统和用途是否提供，信息齐全不代表身份已核验或审批已通过。"
-                    "Nexo 不代为提交申请、不查询审批进度，也不执行授权或撤权。"
+                    "信息齐全时可展示待登记摘要，用户确认后登记申请并返回编号；可查询工单记录，不执行实际审批、授权或撤权，不把记录状态当作真实审批进度。"
                     "若收到批准通知后仍无法访问，保留通知摘要和错误提示，联系 IT 核实实际开通状态。"
                 ),
             },
@@ -221,7 +434,7 @@ class KnowledgeBase:
                     "账号被锁定、登录方式变更或账号归属不明时，由 IT 按企业流程核验。"
                     "是否可以开启两步验证以及如何配置，以企业账号安全规范为准。"
                     "不要共享账号，不向助手或他人发送密码、验证码或完整密钥。"
-                    "Nexo 无法查询账号是否锁定、验证员工身份或执行密码重置，仅提供说明和交接材料。"
+                    "Nexo 无法核验账号或执行密码重置；自助无法完成时可建议登记处理工单。用户明确要求人工则整理交接信息，显示待人工处理，不主动建议建单。"
                 ),
             },
             {
@@ -234,7 +447,7 @@ class KnowledgeBase:
                     "安装前保存当前工作，涉及覆盖配置或已有数据时先按企业规范确认备份。"
                     "安装失败时记录错误提示、发生时间及已尝试的步骤，交给技术支持排查。"
                     "Nexo 不会直接安装软件、查询许可证或修改设备权限；"
-                    "具体可用软件和授权范围需要 IT 确认。"
+                    "具体可用软件和授权范围需要 IT 确认。确需管理员处理时，可整理需求并展示待登记摘要，征得用户确认后登记工单；已解决的咨询无需建单。"
                 ),
             },
             {
@@ -259,9 +472,61 @@ class KnowledgeBase:
                     "技术问题附上环境、错误提示、日志摘要和已经尝试的步骤，避免重复排查。"
                     "权限申请附上目标系统、申请用途，以及用户明确提供的权限范围。"
                     "交接时不要包含密码、验证码、完整密钥等敏感内容，缺少信息时说明尚待补充。"
-                    "Nexo 的交接说明只供员工联系 IT 时使用，尚未创建工单、派单或通知人员，不承诺处理进度与完成时间。"
+                    "用户明确要求人工时，整理摘要并显示待人工处理，不主动建议创建工单；已有工单回执时带上编号。交接状态不等于已建单、派单或人工接手，不承诺完成时间。"
+                ),
+            },
+            {
+                "title": "办公网络与 Wi-Fi 故障排查（演示 SOP）",
+                "content": (
+                    "以下为模拟企业 IT 资料。"
+                    "记录操作系统、故障发生时间、网络类型和影响范围，区分仅本人、同部门多人或整个办公区域。"
+                    "先确认设备已启用 Wi-Fi 或网线连接正常，再查看是否连到企业指定的办公网络，不猜测网络名称或密码。"
+                    "分别确认普通网页和目标系统是否能访问，区分基础网络中断与单个应用问题。"
+                    "在企业允许的范围内尝试重新连接，或用已批准的其他网络做对比，记录结果；不要把建议当作用户已操作。"
+                    "多名员工同时异常时保留发生时间、影响范围与错误提示，整理交接说明供 IT 排查。"
+                    "不要自行修改企业代理、防火墙或网络访问策略，不要求用户提供 Wi-Fi 密码、验证码或密钥。"
+                    "Nexo 不会远程探测设备；需要后续处理时可建议用户明确创建工单。用户明确要求人工则整理摘要，显示待人工处理，不主动建议建单。"
+                ),
+            },
+            {
+                "title": "DNS 与内网访问异常（演示 SOP）",
+                "content": (
+                    "以下为模拟企业 IT 资料。"
+                    "出现 DNS 解析失败或内网域名无法访问时，记录目标系统、原始错误、网络类型、时间及影响范围。"
+                    "先确认普通网络访问是否正常，再确认该系统是否要求企业网络或 VPN；已有权限但连接失败属于网络排查。"
+                    "若尚未获得系统或 VPN 权限，应按权限申请流程处理，不通过网络配置绕过审批。"
+                    "检查是否使用企业指定入口，并按企业已批准的指引核对 DNS、代理和 VPN 配置，不自行改成公共 DNS。"
+                    "同事也无法访问时，记录共同现象并由 IT 核验服务状态；仅本人异常时提供环境和已尝试步骤。"
+                    "Nexo 无法直接执行 DNS 查询或确认服务状态，不把可能原因当成已证实的根因。"
+                ),
+            },
+            {
+                "title": "打印机卡纸与打印异常（演示 SOP）",
+                "content": (
+                    "以下为模拟企业设备支持资料。"
+                    "记录设备类型、打印机型号、屏幕提示、发生时间以及是卡纸、离线还是打印任务失败。"
+                    "卡纸时暂停打印，按照对应型号的官方操作手册打开指定维护位置处理，不强拉纸张或拆卸内部部件。"
+                    "需要断电或接触机内区域时先遵循厂商安全步骤，避开高温部件，无法确认安全操作时停止并交由 IT 处理。"
+                    "仅显示离线且没有机械异常时，检查设备电源与连接状态；网络连接异常可交给网络支持继续排查。"
+                    "不直接清空他人的共享打印任务，不擅自重置设备或安装未知来源驱动。"
+                    "处理后确认是否恢复打印；仍卡纸、异响或异常发热时停止使用，保留型号、错误提示和已尝试步骤供人工核验。"
+                    "Nexo 可查询公共演示资产资料，不查询真实资产系统或远程操作打印机；需要现场处理时可建议登记报修工单。用户明确要求人工则只整理摘要，显示待人工处理。"
+                ),
+            },
+            {
+                "title": "电脑无法开机（演示 SOP）",
+                "content": (
+                    "以下为模拟企业设备支持资料。"
+                    "记录设备类型与型号、发生时间、指示灯和屏幕表现，区分完全无电、开机黑屏与进入系统后软件异常。"
+                    "先查看电源连接及外部电源指示，按设备说明确认使用匹配的电源适配器，不拆机或尝试非匹配电源。"
+                    "不要建议用户取下、拆卸或更换电池；即使是外置可拆卸电池或官方说明允许，也应将电池操作交给专业人员。"
+                    "有进液、焦味、异常发热或电池鼓包时停止使用和充电，在安全可行时断开外部电源并交由专业人员处理。"
+                    "没有这些异常时，再按对应型号官方指引检查显示屏和外接显示连接；不要盲目反复强制关机。"
+                    "进入系统后只有软件崩溃应转软件排查；系统重装、恢复出厂设置或磁盘操作前须先确认企业授权与数据备份。"
+                    "仍无法开机时整理设备型号、指示灯表现和已经尝试的步骤，交给 IT 核验，不声称已诊断出硬件损坏。"
+                    "Nexo 不直接维修设备；需要现场处理时可展示待登记摘要，征得用户确认后登记工单。用户明确要求人工则只整理交接信息，显示待人工处理，不主动建议建单。"
                 ),
             },
         ]
-        self.add_documents(default_docs)
+        self.add_documents(default_docs, preserve_legacy_ids=True)
         logger.info(f"已导入默认知识库: {len(default_docs)} 篇文档")

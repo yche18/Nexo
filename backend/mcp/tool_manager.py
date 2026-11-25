@@ -6,7 +6,7 @@
 本模块的答案：
   1. 查询改写（Query Rewriting）—— 用 LLM 把用户原始问题扩写成多个角度的子查询，
      再合并去重，解决"召回不全"问题。
-  2. 结果重排（Reranking）—— 对召回结果用 LLM 打分，按相关性重新排序，
+  2. 结果重排（Reranking）—— 对融合候选用独立重排服务打分，按相关性重新排序，
      解决"召回不好/排序差"问题。
   3. 熔断器（Circuit Breaker）—— 连续失败超阈值时自动断开，防止雪崩。
   4. 结果缓存（TTL Cache）—— 相同参数直接返回缓存，减少重复调用。
@@ -25,6 +25,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content, thinking_request_kwargs
+from mcp.evidence import (chunk_identity, usable_chunk, select_chunks, expand_neighbors,
+                          merge_windows, evidence_chars)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ class ToolResult:
     cached:         bool = False
     latency_ms:     float = 0.0
     reranked:       bool = False   # 是否经过重排
+    retrieval:      Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -142,6 +145,41 @@ class MCPToolManager:
         self._model  = model
         self._tools: Dict[str, Tool] = {}
         self._cache: Dict[str, tuple] = {}   # key → (result, expire_at, reranked)
+        self._keyword_tool_name: Optional[str] = None
+        self._reranker = None
+        self._neighbor_loader = None
+        self._candidate_k = 20
+        self._rrf_k = 60
+        self._neighbor_window = 1
+        self._max_expansion_seeds = 3
+        self._evidence_max_chars = 8000
+        self._rag_generation = 0
+
+    def set_rag_components(
+        self, keyword_tool_name: Optional[str] = "keyword_search", reranker=None,
+        neighbor_loader=None, candidate_k: int = 20, rrf_k: int = 60,
+        neighbor_window: int = 1, max_expansion_seeds: int = 3,
+        evidence_max_chars: int = 8000,
+    ) -> None:
+        self._keyword_tool_name = keyword_tool_name
+        self._reranker = reranker
+        self._neighbor_loader = neighbor_loader
+        self._candidate_k = max(1, candidate_k)
+        self._rrf_k = max(1, rrf_k)
+        self._neighbor_window = max(0, neighbor_window)
+        self._max_expansion_seeds = max(0, max_expansion_seeds)
+        self._evidence_max_chars = max(2, evidence_max_chars)
+        self.invalidate_rag_cache()
+
+    def invalidate_rag_cache(self) -> None:
+        # 配置或知识版本变化后使旧召回失效；不清理其他工具的缓存。
+        self._rag_generation += 1
+        for key in list(self._cache):
+            if key.startswith("knowledge_search:") or (
+                self._keyword_tool_name and key.startswith(self._keyword_tool_name + ":")
+            ):
+                del self._cache[key]
+
 
     # ── 注册 / 注销 ───────────────────────────────────────────────────────────
 
@@ -171,6 +209,7 @@ class MCPToolManager:
         if not tool:
             return ToolResult(success=False, data=None, tool_name=name, error=f"工具不存在: {name}")
 
+        cache_generation = self._rag_generation
         cache_rerank_top_k = rerank_top_k if rerank_top_k > 0 and tool.supports_rerank else 0
 
         # 缓存命中
@@ -211,10 +250,12 @@ class MCPToolManager:
             reranked = False
             if rerank_top_k > 0 and tool.supports_rerank and isinstance(data, list):
                 query = params.get("query", "")
-                data, reranked = await self._rerank(query, data, rerank_top_k), True
+                ranked = await self._rank_candidates(query, data)
+                data = ranked["items"][:rerank_top_k]
+                reranked = ranked["status"] == "success"
 
             # 写缓存：缓存最终返回结果，避免下次命中未重排的原始结果。
-            if tool.cache_ttl > 0:
+            if tool.cache_ttl > 0 and cache_generation == self._rag_generation:
                 self._set_cache(name, params, data, tool.cache_ttl, cache_rerank_top_k, reranked)
 
             return ToolResult(success=True, data=data, tool_name=name,
@@ -317,83 +358,126 @@ class MCPToolManager:
         top_k: int = 5,
         context: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
-        """
-        完整的检索优化链路：查询改写 → 并行召回 → 去重 → 重排 → Top-K
-
-        这是解决"检索不全、召回不好"的完整方案。
-        """
-        # 1. 查询改写：生成多角度子查询
+        """改写向量召回 + 原问题 BM25 → 两级 RRF → 重排 → 完整证据与有限扩窗。"""
+        t0 = time.monotonic()
+        generation = self._rag_generation
+        if top_k <= 0:
+            return ToolResult(success=False, data=[], tool_name=tool_name, error="top_k 必须大于 0")
         sub_queries = await self.rewrite_query(query, n=3)
-        logger.info(f"查询改写: {query!r} → {sub_queries}")
-
-        # 2. 并行召回：所有子查询同时检索
-        recall_k = max(top_k, 5)
-        tasks = [
-            self.call(tool_name, {"query": q, "top_k": recall_k}, context, use_cache=True)
-            for q in sub_queries
-        ]
+        # 限制改写数量，且始终保留原始问题。改写模型异常格式不影响主问题检索。
+        sub_queries = list(dict.fromkeys(
+            [query] + [q for q in sub_queries if isinstance(q, str) and q.strip()]
+        ))[:4]
+        tasks = [self.call(tool_name, {"query": q, "top_k": self._candidate_k}, context)
+                 for q in sub_queries]
+        keyword_enabled = bool(self._keyword_tool_name)
+        if keyword_enabled:
+            tasks.append(self.call(self._keyword_tool_name,
+                                   {"query": query, "top_k": self._candidate_k}, context))
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        dense_lists, dense_status = [], []
+        for result in results[:len(sub_queries)]:
+            chunks, state = self._retrieval_channel(result)
+            dense_lists.append(chunks)
+            dense_status.append(state)
+        keyword_items, keyword_state = [], {"status": "disabled", "count": 0}
+        if keyword_enabled:
+            keyword_items, keyword_state = self._retrieval_channel(results[-1])
+        # 先将多条 dense 查询变成一票，再和 BM25 等权融合，避免 dense 四票压过一票。
+        dense_items = self._rrf(dense_lists, self._candidate_k)
+        candidates = self._rrf([dense_items, keyword_items], self._candidate_k)
+        ranked = await self._rank_candidates(query, candidates)
+        cores = select_chunks(ranked["items"], top_k, self._evidence_max_chars)
+        expanded = await expand_neighbors(cores, self._neighbor_loader,
+                                          self._neighbor_window, self._max_expansion_seeds)
+        evidence = merge_windows(cores, expanded["chunks"], self._evidence_max_chars)
+        channel_failed = any(state["status"] == "failed" for state in dense_status)
+        channel_failed = channel_failed or keyword_state["status"] == "failed"
+        retrieval = {
+            "queries": sub_queries,
+            "channels": {"dense": dense_status, "keyword": keyword_state},
+            "candidate_count": len(candidates),
+            "rerank": {"status": ranked["status"], "error": ranked.get("error")},
+            "neighbor_errors": expanded["errors"],
+            "degraded": channel_failed or ranked["status"] == "failed" or bool(expanded["errors"]),
+            "evidence": evidence,
+            "evidence_chars": evidence_chars(evidence),
+            "budget_chars": self._evidence_max_chars,
+            "generation": self._rag_generation,
+            "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
+        }
+        if generation != self._rag_generation:
+            # 该请求可能同时读到导入前后的片段，不向 Agent 交付混合版本证据。
+            retrieval.update(evidence=[], evidence_chars=2, degraded=True,
+                             version_changed=True, started_generation=generation)
+            return ToolResult(
+                success=False, data=[], tool_name=tool_name,
+                error="知识库在检索期间已更新，请重试",
+                retrieval=retrieval, latency_ms=retrieval["elapsed_ms"],
+            )
+        return ToolResult(
+            success=bool(evidence), data=evidence, tool_name=tool_name,
+            error=None if evidence else "未检索到可用知识证据",
+            reranked=ranked["status"] == "success", retrieval=retrieval,
+            latency_ms=retrieval["elapsed_ms"],
+        )
 
-        # 3. 合并去重（按内容哈希去重）
-        seen, merged = set(), []
-        for r in results:
-            if isinstance(r, ToolResult) and r.success and isinstance(r.data, list):
-                for item in r.data:
-                    key = hashlib.md5(str(item).encode()).hexdigest()
-                    if key not in seen:
-                        seen.add(key)
-                        merged.append(item)
+    @staticmethod
+    def _retrieval_channel(result) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        if not isinstance(result, ToolResult):
+            return [], {"status": "failed", "count": 0, "error": type(result).__name__}
+        # fallback 即使 success=True，也只是降级说明，不能当作知识库证据。
+        if not result.success or result.error or not isinstance(result.data, list):
+            return [], {"status": "failed", "count": 0, "error": result.error or "检索返回格式错误"}
+        chunks = [dict(item) for item in result.data if usable_chunk(item)]
+        state = "success" if chunks else "empty"
+        if any(isinstance(item, dict) and item.get("fallback") for item in result.data):
+            state = "failed"
+        return chunks, {"status": state, "count": len(chunks), "cached": result.cached}
 
-        if not merged:
-            return ToolResult(success=False, data=[], tool_name=tool_name, error="所有子查询均无结果")
+    def _rrf(self, lists: List[List[Dict[str, Any]]], top_k: int) -> List[Dict[str, Any]]:
+        scores, items = {}, {}
+        for rows in lists:
+            seen = set()
+            rank = 0
+            for item in rows:
+                if not usable_chunk(item):
+                    continue
+                key = chunk_identity(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rank += 1
+                scores[key] = scores.get(key, 0.0) + 1.0 / (self._rrf_k + rank)
+                if key not in items:
+                    items[key] = dict(item)
+        order = sorted(scores, key=lambda key: scores[key], reverse=True)
+        result = []
+        for key in order[:top_k]:
+            item = dict(items[key])
+            item["rrf_score"] = scores[key]
+            result.append(item)
+        return result
 
-        # 4. 重排：用 LLM 对合并结果按相关性打分，取 Top-K
-        reranked = await self._rerank(query, merged, top_k)
-        return ToolResult(success=True, data=reranked, tool_name=tool_name, reranked=True)
-
-    # ── 结果重排（解决召回不好）──────────────────────────────────────────────
+    async def _rank_candidates(self, query: str, items: List[Any]) -> Dict[str, Any]:
+        if self._reranker is None:
+            return {"items": items, "status": "disabled", "error": None}
+        try:
+            return await self._reranker.rerank(query, items)
+        except Exception as ex:
+            return {"items": items, "status": "failed", "error": type(ex).__name__}
 
     async def _rerank(self, query: str, items: List[Any], top_k: int) -> List[Any]:
-        """
-        用 LLM 对召回结果重新打分排序。
-
-        解决问题：向量检索的相似度分数不等于"对用户有用"，
-        LLM 能理解语义相关性，重排后 Top-K 质量显著提升。
-        """
-        if len(items) <= top_k:
-            return items
-
-        # 将结果序列化为文本供 LLM 评分
-        items_text = "\n".join(f"{i}. {json.dumps(item, ensure_ascii=False)[:200]}"
-                               for i, item in enumerate(items))
-        prompt = f"""根据用户查询，对以下检索结果按相关性打分（0-10），返回 JSON 数组。
-用户查询: "{query}"
-检索结果:
-{items_text}
-
-返回格式（按相关性降序排列的索引列表）: [最相关的索引, ..., 最不相关的索引]
-只返回 JSON 数组，不要其他文字。"""
-        prompt = self._clean_text(prompt)
-
-        try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
-                **thinking_request_kwargs(),
-            )
-            raw = extract_text_content(resp.content)
-            s, e = raw.find("["), raw.rfind("]") + 1
-            order: List[int] = json.loads(raw[s:e])
-            reranked = [items[i] for i in order if 0 <= i < len(items)]
-            return reranked[:top_k]
-        except Exception as ex:
-            logger.warning(f"重排失败，返回原始顺序: {ex}")
-            return items[:top_k]
+        """保留原内部入口；重排失败保留候选顺序，状态由调用方单独记录。"""
+        ranked = await self._rank_candidates(query, items)
+        return ranked["items"][:top_k]
 
     # ── 缓存 ──────────────────────────────────────────────────────────────────
 
     def _cache_key(self, name: str, params: Dict, rerank_top_k: int = 0) -> str:
         payload = {"params": params, "rerank_top_k": rerank_top_k}
+        if name == "knowledge_search" or name == self._keyword_tool_name:
+            payload["rag_generation"] = self._rag_generation
         return f"{name}:{hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"
 
     def _get_cache(self, name: str, params: Dict, rerank_top_k: int = 0) -> Optional[Tuple[Any, bool]]:

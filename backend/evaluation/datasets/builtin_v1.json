@@ -1,0 +1,73 @@
+{
+  "version": "builtin_v1",
+  "intent_cases": [
+    {
+      "message": "办公软件怎么安装？",
+      "expected_intent": "query"
+    },
+    {
+      "message": "帮我配置打印机",
+      "expected_intent": "request"
+    },
+    {
+      "message": "你们服务太差了！",
+      "expected_intent": "complaint"
+    },
+    {
+      "message": "应用一直报500错误",
+      "expected_intent": "technical_crash"
+    },
+    {
+      "message": "我要申请项目系统权限",
+      "expected_intent": "permission_request"
+    },
+    {
+      "message": "转 IT 人工处理",
+      "expected_intent": "human_handoff"
+    },
+    {
+      "message": "你好",
+      "expected_intent": "greeting"
+    },
+    {
+      "message": "修改我的工作邮箱地址",
+      "expected_intent": "account"
+    },
+    {
+      "message": "如何开通 VPN 访问权限？",
+      "expected_intent": "permission_request"
+    },
+    {
+      "message": "发现企业账户异常登录",
+      "expected_intent": "account_security"
+    },
+    {
+      "message": "登录一直报401",
+      "expected_intent": "technical_login"
+    }
+  ],
+  "dialog_cases": [
+    {
+      "question": "办公软件安装需要什么信息？"
+    },
+    {
+      "question": "VPN 登录一直报错 401"
+    },
+    {
+      "question": "我要申请项目系统权限"
+    },
+    {
+      "question": "VPN 登录报错，同时需要申请项目权限"
+    },
+    {
+      "turns": [
+        "我想申请权限",
+        "目标系统是项目管理平台，用于查看需求",
+        "下一步怎么处理？"
+      ]
+    },
+    {
+      "question": "请转 IT 人工处理"
+    }
+  ]
+}

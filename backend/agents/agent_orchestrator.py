@@ -16,6 +16,7 @@
   - Agent 置信度低于阈值 → 自动升级到更高级 Agent 或转人工
 """
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -32,13 +33,23 @@ from anthropic import AsyncAnthropic
 
 from agents.tools import (
     AgentToolSpec,
+    check_access_fields,
+    get_ticket,
+    parse_ticket_action,
+    ticket_confirmation_matches,
+    ticket_fingerprint,
     build_shared_rag_tools,
     access_tools,
+    device_tools,
     escalation_tools,
     general_tools,
     technical_tools,
 )
-from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
+from core.intent_recognizer import (
+    IntentCategory, IntentRecognizer, UrgencyLevel,
+    NETWORK_ISSUE_KEYWORDS, DEVICE_FAILURE_KEYWORDS, SOFTWARE_INSTALL_KEYWORDS,
+    match_domain_keywords,
+)
 from core.llm_utils import extract_text_content, thinking_request_kwargs
 
 logger = logging.getLogger(__name__)
@@ -49,6 +60,8 @@ logger = logging.getLogger(__name__)
 class AgentType(Enum):
     GENERAL   = "general"    # 通用客服
     TECHNICAL = "technical"  # 技术支持
+    NETWORK   = "network"    # 网络连接与 VPN 故障
+    DEVICE    = "device"     # 设备硬件故障
     ACCESS    = "access"     # 账号与权限申请指引
     ESCALATION = "escalation" # 人工升级与交接
 
@@ -119,6 +132,8 @@ class AgentResponse:
     escalate:    bool  = False   # 是否需要升级
     tools_used:  List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    harness_events: List[Dict[str, Any]] = field(default_factory=list)
+    state_updates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +142,8 @@ class AgentCallResult:
     content: str
     tools_used: List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    harness_events: List[Dict[str, Any]] = field(default_factory=list)
+    state_updates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class AgentCallError(RuntimeError):
@@ -136,6 +153,8 @@ class AgentCallError(RuntimeError):
         super().__init__(message)
         self.tools_used = list(tools_used)
         self.tool_traces = list(tool_traces)
+        self.harness_events = []
+        self.state_updates = []
 
 
 @dataclass
@@ -151,6 +170,9 @@ class Request:
     urgency:     Optional[UrgencyLevel]   = None
     intent_confidence: float = 1.0
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    case_state: Dict[str, Any] = field(default_factory=dict)
+    harness_mode: Optional[str] = None
+    ticket_tools_allowed: bool = True
 
 
 @dataclass
@@ -166,8 +188,13 @@ class OrchestratorResult:
     supporting_agents: List[AgentType] = field(default_factory=list)
     tools_used: List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    harness_events: List[Dict[str, Any]] = field(default_factory=list)
+    state_updates: List[Dict[str, Any]] = field(default_factory=list)
     routing_reason: str = ""
     routing_confidence: float = 0.0
+    case_state: Dict[str, Any] = field(default_factory=dict)
+    validation: Dict[str, Any] = field(default_factory=dict)
+    execution_success: bool = True
 
 
 @dataclass
@@ -219,14 +246,11 @@ class BaseAgent:
 
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
-        self.stats.total += 1
         try:
             call_result = await self._call_llm(req)
             ms = (time.monotonic() - t0) * 1000
-            self.stats.success += 1
-            self.stats.total_ms += ms
             escalate = self._needs_escalation(call_result.content)
-            return AgentResponse(
+            response = AgentResponse(
                 agent_type=self.agent_type,
                 content=call_result.content,
                 success=True,
@@ -234,9 +258,17 @@ class BaseAgent:
                 escalate=escalate,
                 tools_used=call_result.tools_used,
                 tool_traces=call_result.tool_traces,
+                harness_events=call_result.harness_events,
+                state_updates=call_result.state_updates,
             )
+            # 只统计已完成请求，避免 Monitor 把正在执行的请求当成失败。
+            self.stats.total += 1
+            self.stats.success += 1
+            self.stats.total_ms += ms
+            return response
         except Exception as ex:
             ms = (time.monotonic() - t0) * 1000
+            self.stats.total += 1
             self.stats.total_ms += ms
             logger.error(f"{self.agent_type.value} 处理失败: {ex}")
             tools_used = ex.tools_used if isinstance(ex, AgentCallError) else []
@@ -248,119 +280,13 @@ class BaseAgent:
                 latency_ms=ms,
                 tools_used=list(tools_used),
                 tool_traces=list(tool_traces),
+                harness_events=getattr(ex, "harness_events", []),
+                state_updates=getattr(ex, "state_updates", []),
             )
 
     async def _call_llm(self, req: Request) -> AgentCallResult:
-        def _clean(s: str) -> str:
-            return s.encode("utf-8", errors="ignore").decode("utf-8")
-
-        messages = []
-        if req.context:
-            messages.append({"role": "user", "content": f"[背景信息]\n{_clean(req.context)}"})
-            messages.append({"role": "assistant", "content": "好的，我已了解背景信息。"})
-        if req.entities:
-            entities_text = json.dumps(req.entities, ensure_ascii=False)
-            messages.append({"role": "user", "content": f"[结构化实体]\n{_clean(entities_text)}"})
-            messages.append({"role": "assistant", "content": "好的，我会结合这些结构化实体处理。"})
-        role_packet = self._build_role_packet(req)
-        if role_packet:
-            messages.append({"role": "user", "content": f"[角色输入契约]\n{_clean(role_packet)}"})
-            messages.append({"role": "assistant", "content": "好的，我会按照该角色的输入和输出契约处理。"})
-        messages.append({"role": "user", "content": _clean(req.message)})
-
-        tools = self.get_tools()
-        tools_used: List[str] = []
-        tool_traces: List[Dict[str, Any]] = []
-        try:
-            for _ in range(3):
-                request_kwargs: Dict[str, Any] = {
-                    "model": self._model,
-                    "max_tokens": self.profile.max_tokens,
-                    "temperature": self.profile.temperature,
-                    "system": self._build_system_prompt(req),
-                    "messages": messages,
-                }
-                request_kwargs.update(thinking_request_kwargs())
-                if tools:
-                    request_kwargs["tools"] = [
-                        {
-                            "name": spec.name,
-                            "description": spec.description,
-                            "input_schema": spec.input_schema,
-                        }
-                        for spec in tools.values()
-                    ]
-                resp = await self._client.messages.create(**request_kwargs)
-                tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
-                if not tool_uses:
-                    return AgentCallResult(
-                        content=extract_text_content(resp.content),
-                        tools_used=list(tools_used),
-                        tool_traces=list(tool_traces),
-                    )
-
-                messages.append({"role": "assistant", "content": resp.content})
-                tool_results = []
-                for block in tool_uses:
-                    name = self._block_value(block, "name")
-                    tool_use_id = self._block_value(block, "id")
-                    args = self._block_value(block, "input") or {}
-                    spec = tools.get(name)
-                    tool_t0 = time.monotonic()
-                    call_success = True
-                    result_success: Optional[bool] = None
-                    error_text = ""
-                    if spec is None:
-                        call_success = False
-                        result: Any = {"success": False, "error": f"工具不在 {self.agent_type.value} Agent 白名单中"}
-                        error_text = result["error"]
-                    else:
-                        try:
-                            self._validate_tool_input(spec, args)
-                            result = spec.handler(req, args)
-                            if inspect.isawaitable(result):
-                                result = await result
-                            tools_used.append(name)
-                            if isinstance(result, dict) and "success" in result:
-                                result_success = bool(result.get("success"))
-                        except Exception as ex:
-                            call_success = False
-                            logger.warning("Agent 工具 %s 执行失败: %s", name, ex)
-                            error_text = str(ex)
-                            result = {"success": False, "error": error_text}
-                    tool_latency_ms = (time.monotonic() - tool_t0) * 1000
-                    if not error_text and isinstance(result, dict):
-                        error_text = str(result.get("error", "") or "")
-                    tool_traces.append(
-                        {
-                            "agent_type": self.agent_type.value,
-                            "tool_name": name,
-                            "tool_use_id": tool_use_id,
-                            "input": dict(args),
-                            "success": call_success,
-                            "result_success": result_success,
-                            "latency_ms": round(tool_latency_ms, 1),
-                            "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
-                            "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
-                            "error": error_text,
-                        }
-                    )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    })
-                messages.append({"role": "user", "content": tool_results})
-
-            raise AgentCallError(
-                f"{self.agent_type.value} 工具调用超过最大轮数",
-                tools_used,
-                tool_traces,
-            )
-        except AgentCallError:
-            raise
-        except Exception as ex:
-            raise AgentCallError(str(ex), tools_used, tool_traces) from ex
+        from harness.runtime import run_agent
+        return await run_agent(self, req)
 
     @staticmethod
     def _block_type(block: Any) -> Optional[str]:
@@ -394,6 +320,11 @@ class BaseAgent:
 
     def _build_system_prompt(self, req: Request) -> str:
         """把角色契约和动态 Skills 拼入 system prompt。"""
+        from harness.context import harness_mode
+        tool_scope = list(self.profile.tool_scope)
+        if ((req.harness_mode or harness_mode()) == "enforce" and req.ticket_tools_allowed
+                and getattr(self, "_ticket_store", None) is not None):
+            tool_scope.extend(["prepare_ticket", "create_ticket"])
         profile_prompt = (
             f"\n\n[角色契约]\n"
             f"角色：{self.profile.role}\n"
@@ -402,12 +333,26 @@ class BaseAgent:
             f"可用输入：{'；'.join(self.profile.input_contract)}\n"
             f"输出要求：{'；'.join(self.profile.output_contract)}\n"
             f"升级条件：{'；'.join(self.profile.handoff_conditions) or '无，按通用客服规则处理'}\n"
-            f"允许的数据/工具范围：{'、'.join(self.profile.tool_scope) or '仅使用当前请求上下文'}\n"
+            f"允许的数据/工具范围：{'、'.join(tool_scope) or '仅使用当前请求上下文'}\n"
             "不要声称执行了未提供的查询、修改或授权操作；缺少证据时明确说明需要核验。\n"
             "[IT 支持实体] target_system=目标系统，issue_description=问题现象，date=发生时间，"
-            "error_code=错误码，requested_access=申请权限，purpose=申请用途。"
+            "error_code=错误码，requested_access=申请权限，purpose=申请用途，"
+            "operating_system=操作系统，client_version=客户端版本，network_type=网络环境，"
+            "impact_scope=影响范围，device_type=设备类型，device_model=设备型号。"
             "实体仅由本轮消息的规则匹配得到，空值表示未提取到，不代表用户没有该信息；结合原文和已有上下文理解。"
         )
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce":
+            profile_prompt += (
+                "\n[支持流程与工单] 可以登记工单并查询记录状态，不执行实际审批、授权、密码重置或维修。"
+                "权限申请信息齐全，或账号/软件/网络/设备问题需要后续处理时，调用 prepare_ticket 准备摘要供用户确认。"
+                "申请字段应先用 record_support_progress 保存有原话依据的事实；不能只在回复里列出。"
+                "用户同意已展示的摘要（如需要、好的、确认），或明确请求建单后，自主调用 create_ticket 并根据工具回执回答，不重复询问、不要求固定口令。确认含糊、取消或材料变更时不直接建单。只有主 Agent 可用建单工具，协作 Agent 只处理自己领域。"
+                "用户明确要求人工时，只整理交接摘要并说明‘待人工处理’，不主动建议创建工单；这不表示已建单或有人接手。"
+                "已有 ticket_receipt 时带上编号，不再建议重复建单；补充信息不自动更新原单。"
+                "查询当前工单可引导用户单独发送‘查询当前工单’，真实审批进度和实际开通结果仍需 IT 核验。"
+                "咨询已回答或问题已解决时正常收尾，不强行建单；不要反复向用户解释未通知 IT 等内部接入情况。"
+            )
         base_prompt = f"{self.system_prompt}{profile_prompt}"
         if self._skill_manager is None:
             return base_prompt
@@ -454,7 +399,7 @@ class GeneralAgent(BaseAgent):
 
     def _build_role_packet(self, req: Request) -> str:
         packet = json.loads(super()._build_role_packet(req))
-        packet["triage_targets"] = ["technical", "access", "escalation"]
+        packet["triage_targets"] = ["technical", "access", "network", "device", "escalation"]
         packet["response_mode"] = "answer_or_clarify"
         return json.dumps(packet, ensure_ascii=False)
 
@@ -478,7 +423,7 @@ class TechnicalAgent(BaseAgent):
         max_tokens=1200,
     )
     system_prompt = (
-        "你是 Nexo 的 IT 技术支持专家。专注于 VPN、登录、网络和办公软件的故障排查、错误诊断与配置指引。"
+        "你是 Nexo 的 IT 技术支持专家。专注于办公软件安装更新、登录、应用崩溃和通用技术问题的故障排查、错误诊断与配置指引。明确的网络连接故障由 Network 支持，设备硬件故障由 Device 支持。"
         "提供清晰的步骤化解决方案。遇到需要后台操作的问题，说明需要升级处理。"
     )
 
@@ -497,6 +442,56 @@ class TechnicalAgent(BaseAgent):
         return tools
 
 
+class NetworkAgent(TechnicalAgent):
+    agent_type = AgentType.NETWORK
+    profile = AgentProfile(
+        role="网络连接与 VPN 故障排查",
+        mission="区分本机、网络环境和服务端问题，按知识库 SOP 给出低风险且可验证的连接排查步骤。",
+        workflow=("确认连接现象", "确认网络环境和影响范围", "查阅适用 SOP", "按已有排查结果继续", "验证或交接"),
+        input_contract=("目标系统", "问题现象", "错误码", "操作系统", "客户端版本", "网络环境", "影响范围", "知识库上下文"),
+        output_contract=("问题判断", "适用 SOP 的必要步骤", "验证方式", "尚缺信息", "升级条件"),
+        handoff_conditions=("多名员工持续无法连接", "需要网络管理员操作", "完成适用排查后仍未恢复"),
+        tool_scope=("search_knowledge_base", "lookup_error_code", "build_diagnostic_plan"),
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    system_prompt = (
+        "你是 Nexo 的网络支持专家，负责 Wi-Fi、有线网络、DNS 和 VPN 连接故障。"
+        "先查询知识库，找到适用 SOP 后保留必要步骤，不再调用通用诊断工具生成另一套流程。"
+        "结合用户已执行的操作继续排查，不把未执行的建议记作完成。"
+        "申请 VPN 使用权限属于 Access；软件崩溃属于 Technical；硬件损坏属于 Device。"
+        "没有实际网络探测或后台管理工具，不声称已测试连接或修改配置；工单创建以实际回执为准。"
+    )
+
+
+class DeviceAgent(BaseAgent):
+    agent_type = AgentType.DEVICE
+    profile = AgentProfile(
+        role="办公设备故障排查",
+        mission="根据设备类型、型号和故障现象查阅设备 SOP，先区分软硬件与连接原因，再提供低风险检查与人工维修交接指引。",
+        workflow=("确认设备和现象", "检查安全风险", "查阅适用 SOP", "给出外部可操作检查", "验证或交接"),
+        input_contract=("设备类型", "设备型号", "问题现象", "发生时间", "影响范围", "知识库上下文"),
+        output_contract=("现象确认", "必要检查步骤", "验证方式", "需补充信息", "维修交接边界"),
+        handoff_conditions=("冒烟、异味、电池鼓包或漏电", "需要拆机或更换部件", "适用检查后仍未恢复"),
+        tool_scope=("search_knowledge_base", "lookup_asset"),
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    system_prompt = (
+        "你是 Nexo 的办公设备支持专家，负责电脑、手机和打印机等设备的故障初诊与硬件排查。"
+        "原因尚不明确的设备异常先区分软硬件与连接问题，不预设硬件损坏。"
+        "先查询知识库，按适用设备 SOP 回答，信息不足时只询问本轮必要字段。"
+        "不要把软件网络通用诊断流程套用到硬件故障；已明确的应用安装和崩溃由 Technical 处理，已明确的网络连接故障由 Network 处理。"
+        "只提供安全的外部检查，不要求拆机、带电维修或反复强制启动。"
+        "可通过 lookup_asset 查询公共演示资产资料；没有远程控制能力；可经用户确认登记报修工单，是否成功以工具回执为准，不声称已检查设备或安排维修。"
+    )
+
+    def get_tools(self) -> Dict[str, AgentToolSpec]:
+        tools = super().get_tools()
+        tools.update(device_tools())
+        return tools
+
+
 class AccessAgent(BaseAgent):
     agent_type = AgentType.ACCESS
     profile = AgentProfile(
@@ -512,23 +507,22 @@ class AccessAgent(BaseAgent):
     )
     system_prompt = (
         "你是 Nexo 的账号与权限支持专家，负责企业账号咨询与权限申请指引。"
-        "按知识库说明流程；使用 check_access_fields 检查已提取的目标系统与用途，按缺失字段补问。"
-        "你未接入身份、审批或权限系统，不得声称已查询权限、提交申请、完成审批或开通账号。"
-        "登录和网络故障由技术支持排查；需要实际操作时建议转人工（IT 支持），不索要密码和验证码。"
+        "按知识库说明流程；权限申请使用 check_access_fields 检查目标系统与用途，按缺失字段补问。账号恢复、密码重置不以申请用途为必填，不套用权限审批材料清单。"
+        "可帮助登记权限申请工单；未接入身份、审批或权限系统，不得声称已核验身份、提交到真实审批系统、完成审批或开通账号。"
+        "登录故障由 Technical 排查，网络连接故障由 Network 排查；需要实际操作时建议转人工（IT 支持），不索要密码和验证码。"
     )
 
     def _build_role_packet(self, req: Request) -> str:
         packet = json.loads(super()._build_role_packet(req))
+        checked = check_access_fields(req, {})
+        values = checked["values"]
         packet["application_fields"] = {
-            "target_system": req.entities.get("target_system", []),
-            "purpose": req.entities.get("purpose", []),
-            "missing_fields": [
-                field for field, values in (
-                    ("目标系统", req.entities.get("target_system", [])),
-                    ("申请用途", req.entities.get("purpose", [])),
-                ) if not values
-            ],
-            "risk_boundary": "只提供指引，不查询身份、不执行授权、不承诺审批结果",
+            "target_system": values["target_system"],
+            "purpose": values["purpose"],
+            "missing_fields": [label for key, label in (("target_system", "目标系统"), ("purpose", "申请用途"))
+                               if key in checked["missing_fields"]],
+            "check_scope": checked["reason"],
+            "risk_boundary": "可以登记申请工单，不查询身份、不执行授权、不承诺审批结果",
         }
         return json.dumps(packet, ensure_ascii=False)
 
@@ -564,6 +558,23 @@ class EscalationAgent(BaseAgent):
         tools.update(escalation_tools())
         return tools
 
+    @staticmethod
+    def latest_user_report(req):
+        """Keep the user's latest report as a quote, not an executed-step claim."""
+        import re
+        message = (req.message or "").strip()
+        handoff_only = re.fullmatch(
+            r"(?:那你|那|请你|请|麻烦你|麻烦)?(?:帮我)?(?:转(?:接|交)?给?人工(?:客服)?|联系人工(?:客服)?)(?:吧|一下|处理)?[。！!？?\s]*",
+            message,
+        )
+        if message and not handoff_only:
+            return {"content": message, "source": "user_reported", "request_id": req.request_id}
+        if not req.case_state.get("new_topic"):
+            previous = req.case_state.get("latest_user_report", {})
+            if previous.get("source") == "user_reported":
+                return dict(previous)
+        return {}
+
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
@@ -576,6 +587,12 @@ class EscalationAgent(BaseAgent):
             "error_code": "错误码",
             "requested_access": "申请权限",
             "purpose": "申请用途",
+            "operating_system": "操作系统",
+            "client_version": "客户端版本",
+            "network_type": "网络环境",
+            "impact_scope": "影响范围",
+            "device_type": "设备类型",
+            "device_model": "设备型号",
         }
         # 仅整理交接展示字段，不修改 req.entities 或全局实体提取规则。
         aliases = {
@@ -585,7 +602,21 @@ class EscalationAgent(BaseAgent):
             "error_code": ("错误码", "状态码"),
             "requested_access": ("申请权限", "期望权限", "所需权限", "权限类型", "权限"),
             "purpose": ("申请用途", "用途"),
+            "operating_system": ("操作系统", "系统版本"),
+            "client_version": ("客户端版本", "软件版本"),
+            "network_type": ("网络环境", "网络类型"),
+            "impact_scope": ("影响范围",),
+            "device_type": ("设备类型",),
+            "device_model": ("设备型号", "电脑型号", "打印机型号"),
         }
+        new_fields = ("operating_system", "client_version", "network_type",
+                      "impact_scope", "device_type", "device_model")
+        user_sources = [message.get("content") or "" for message in req.history or []
+                        if message.get("role") == "user"]
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state.get("new_topic"):
+            user_sources = []
+        user_sources.append(req.message)
         context = req.context or ""
         sources = []
         if context.startswith("[会话摘要]\n"):
@@ -605,12 +636,22 @@ class EscalationAgent(BaseAgent):
             elif "\n\n" + marker in context:
                 sources.append(context.split("\n\n" + marker, 1)[1])
 
+        from harness.context import harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce":
+            # 助手建议与自动摘要不能作为用户已确认的交接事实。
+            sources = [message.get("content") or "" for message in req.history or []
+                       if message.get("role") == "user"]
+            if req.case_state.get("new_topic"):
+                sources = []
+            sources.append(req.message)
         fields = {}
         for source in sources:
             text = source.replace("**", "").replace("`", "")
             for line in re.split(r"[\n；;]", text):
                 line = re.sub(r"^\s*(?:[-*>]+|\d+[.)、])\s*", "", line).strip()
                 for key, names in aliases.items():
+                    if key in new_fields and source not in user_sources:
+                        continue
                     labels = "|".join(re.escape(name) for name in names)
                     # 已确认的 Markdown 表格、字段列表及显式更正，后出现的值优先。
                     match = re.match(rf"^\|\s*(?:{labels})\s*\|\s*([^|]+)\|", line)
@@ -635,17 +676,80 @@ class EscalationAgent(BaseAgent):
             codes = re.findall(r"(?:错误码|状态码|报错?|HTTP)\s*[:：#]?\s*([45]\d{2})\b", text, re.I)
             if codes:
                 fields["error_code"] = "、".join(dict.fromkeys(codes))
+        # 新领域字段仅从用户原话提取，复用同一套规则，不把助手建议当成环境事实。
+        recognizer = IntentRecognizer.__new__(IntentRecognizer)
+        for source in user_sources:
+            extracted = recognizer._extract_entities(source)
+            for key in new_fields:
+                if extracted.get(key):
+                    fields[key] = "、".join(extracted[key])[:120]
+            issues = match_domain_keywords(source, NETWORK_ISSUE_KEYWORDS + DEVICE_FAILURE_KEYWORDS)
+            if issues:
+                existing = re.split(r"[，、]", fields.get("issue_description", ""))
+                issues = list(dict.fromkeys(item for item in existing + issues if item))
+                fields["issue_description"] = "，".join(issues)[:120]
+        from harness.context import harness_mode
+        blocked_new_fields = set()
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            # 未确认候选不能通过旧助手回复或摘要重新成为交接事实。
+            for candidate in req.case_state.get("candidates", []):
+                fields.pop(candidate.get("field"), None)
+                if candidate.get("field") in new_fields:
+                    blocked_new_fields.add(candidate["field"])
         for key in entity_labels:
+            if key in blocked_new_fields:
+                continue
             if (req.entities or {}).get(key):
                 fields[key] = "、".join(req.entities[key])[:120]
 
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            from harness.state import handoff_fields
+            fields.update(handoff_fields(req.case_state))
+            for conflict in req.case_state.get("conflicts", []):
+                fields.pop(conflict.get("field"), None)
         details = [f"- {label}：{fields[key]}" for key, label in entity_labels.items() if fields.get(key)]
-        sections = ["我已将您的问题标记为 IT 人工处理。"]
+        receipt = (req.case_state or {}).get("ticket_receipt") or {}
+        if receipt.get("source") == "nexo_local" and receipt.get("ticket_id"):
+            sections = [f"工单 {receipt['ticket_id']} 当前待人工处理，交接信息如下。"]
+        else:
+            sections = ["已整理您的问题和相关信息，当前待人工处理。"]
         if details:
             sections.append("**交接信息**\n" + "\n".join(details))
         else:
             sections.append("暂未提取到具体信息，请补充涉及的系统、问题现象或申请需求。")
-        sections.append("请不要发送密码、短信验证码或完整密钥；以上仅为交接说明，尚未创建工单或通知 IT 人员。")
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            asset_lookup = req.case_state.get("asset_lookup") or {}
+            if asset_lookup.get("source") == "demo":
+                asset_id = str(asset_lookup.get("asset_id") or "未提供有效编号")[:80]
+                if asset_lookup.get("status") == "found":
+                    asset_model = str((asset_lookup.get("asset") or {}).get("device_model") or "")[:120]
+                    asset_lines = [f"- 演示资产编号：{asset_id}", f"- 演示资料型号：{asset_model}",
+                                   "- 来源：lookup_asset 返回的公开虚构演示资料，不是用户陈述或真实资产核验结果。"]
+                    user_model = fields.get("device_model")
+                    if user_model and user_model.strip().lower() != asset_model.strip().lower():
+                        asset_lines.append("- 用户提供的设备型号与演示资料型号不一致，需由 IT 核对，不能用演示资料覆盖用户描述。")
+                else:
+                    status = "未找到该编号" if asset_lookup.get("status") == "not_found" else "本次查询不可用"
+                    asset_lines = [f"- 演示资产编号：{asset_id}", f"- 演示查询结果：{status}，没有可用型号资料。",
+                                   "- 来源：公开虚构演示资产查询，不代表真实企业资产状态。"]
+                sections.append("**演示资产资料（工具返回）**\n" + "\n".join(asset_lines))
+            completed = [step for step in req.case_state.get("steps", [])
+                         if step.get("status") == "user_reported_done"
+                         and step.get("source") == "user_reported"
+                         and step.get("source_quote") and step.get("result")]
+            if completed:
+                step_lines = [f"- {str(step.get('description', ''))[:120]}：{str(step['result'])[:120]}"
+                              for step in completed[-4:]]
+                sections.append("**已尝试及结果（用户反馈）**\n" + "\n".join(step_lines))
+        if (req.harness_mode or harness_mode()) == "enforce":
+            report = self.latest_user_report(req)
+            if report.get("content"):
+                quoted = report["content"][:300]
+                if len(report["content"]) > 300:
+                    quoted += "…"
+                sections.append("**最新反馈（用户原话）**\n" + quoted
+                                + "\n以上是用户反馈，待 IT 人员核验，不代表系统已代为执行或确认解决。")
+        sections.append("请不要发送密码、短信验证码或完整密钥。")
         content = "\n\n".join(sections)
         ms = (time.monotonic() - t0) * 1000
         self.stats.success += 1
@@ -688,6 +792,9 @@ class ResponseComposer:
             f"用户问题：{req.message}\n"
             f"候选结果：\n{evidence}"
         )
+        from harness.context import case_context, harness_mode
+        if (req.harness_mode or harness_mode()) == "enforce" and req.case_state:
+            prompt += "\n\n" + case_context(req.case_state)
         if self._skill_manager is not None:
             skill = self._skill_manager.prompt_for(req.message, "general")
             if skill:
@@ -730,6 +837,11 @@ class AgentOrchestrator:
         IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
         IntentCategory.TECHNICAL_LOGIN: AgentType.TECHNICAL,
         IntentCategory.TECHNICAL_CRASH: AgentType.TECHNICAL,
+        IntentCategory.SOFTWARE_INSTALL: AgentType.TECHNICAL,
+        IntentCategory.NETWORK: AgentType.NETWORK,
+        IntentCategory.NETWORK_ISSUE: AgentType.NETWORK,
+        IntentCategory.DEVICE: AgentType.DEVICE,
+        IntentCategory.DEVICE_FAILURE: AgentType.DEVICE,
         IntentCategory.ACCOUNT:    AgentType.ACCESS,
         IntentCategory.ACCOUNT_SECURITY: AgentType.ACCESS,
         IntentCategory.PERMISSION_REQUEST: AgentType.ACCESS,
@@ -749,6 +861,7 @@ class AgentOrchestrator:
         model:    str = "claude-3-5-sonnet-20241022",
         skill_manager: Optional[Any] = None,
         rag_tool_manager: Optional[Any] = None,
+        ticket_store: Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -757,6 +870,7 @@ class AgentOrchestrator:
 
         self._intent_recognizer = IntentRecognizer(api_key=api_key, base_url=base_url, model=model)
         self._skill_manager = skill_manager
+        self._ticket_store = ticket_store
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}
         self._recent_tool_traces = deque(maxlen=_env_int("NEXO_TOOL_TRACE_MAX", 200))
@@ -766,9 +880,14 @@ class AgentOrchestrator:
             AgentType.GENERAL: [self._make_agent(GeneralAgent, client, model, skill_manager)],
             AgentType.TECHNICAL: [self._make_agent(TechnicalAgent, client, model, skill_manager)],
             AgentType.ACCESS: [self._make_agent(AccessAgent, client, model, skill_manager)],
+            AgentType.NETWORK: [self._make_agent(NetworkAgent, client, model, skill_manager)],
+            AgentType.DEVICE: [self._make_agent(DeviceAgent, client, model, skill_manager)],
             AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager)],
         }
         self.set_shared_tools(build_shared_rag_tools(rag_tool_manager))
+        for agents in self._pool.values():
+            for agent in agents:
+                agent._ticket_store = ticket_store
 
     @staticmethod
     def _make_agent(
@@ -821,6 +940,9 @@ class AgentOrchestrator:
             "tool_calls": list(result.tool_traces),
             "escalated": result.escalated,
             "latency_ms": round(result.latency_ms, 1),
+            "harness_events": list(result.harness_events),
+            "validation": dict(result.validation),
+            "case_state": dict(result.case_state),
         }
         self._recent_tool_traces.append(trace)
 
@@ -844,6 +966,14 @@ class AgentOrchestrator:
           意图识别 → 路由选 Agent → 执行 → 检查升级 → 返回结果
         """
         t0 = time.monotonic()
+        from harness.context import harness_mode
+        action = parse_ticket_action(req.message)
+        mode = req.harness_mode or harness_mode()
+        if action and (action["action"] == "get_ticket" or mode != "enforce"):
+            return await self._run_ticket_action(req, action)
+        ticket_turn = mode == "enforce" and (
+            bool(action and action["action"] == "create_ticket") or ticket_confirmation_matches(req)
+        )
 
         # 1. 意图识别（如果调用方已识别则跳过）
         if req.intent is None:
@@ -853,10 +983,10 @@ class AgentOrchestrator:
             req.urgency = intent_result.urgency
             req.intent_confidence = intent_result.confidence
 
-        if self._needs_clarification(req):
+        if not ticket_turn and self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
-                response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
+                response="我还不能确定您要处理的是哪类问题。请补充一下是账号权限、办公软件、网络连接，还是设备故障？",
                 agent_type=AgentType.GENERAL,
                 intent=req.intent,
                 escalated=False,
@@ -866,11 +996,14 @@ class AgentOrchestrator:
                 routing_reason="低置信度 OTHER 意图，先澄清用户需求",
                 routing_confidence=req.intent_confidence,
             )
-            self._record_tool_trace(result)
-            return result
+            return await self._finalize_result(req, result)
 
         # 复杂问题自动并行协作，例如同一句同时涉及登录故障和扣款/退款。
-        decision = self._route_decision(req)
+        if ticket_turn:
+            decision = RoutingDecision(primary_agent=AgentType.GENERAL,
+                                       reason="继续当前工单确认，由 Agent 选择工具", confidence=1.0)
+        else:
+            decision = self._route_decision(req)
         if decision.multi_agent:
             return await self.run_parallel(req, decision)
 
@@ -899,8 +1032,60 @@ class AgentOrchestrator:
             supporting_agents=[],
             tools_used=list(response.tools_used),
             tool_traces=list(response.tool_traces),
+            execution_success=response.success,
+            harness_events=list(response.harness_events),
+            state_updates=list(response.state_updates),
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
+        )
+        return await self._finalize_result(req, result)
+
+    async def _run_ticket_action(self, req: Request, action: Dict[str, str]) -> OrchestratorResult:
+        """Keep deterministic ticket queries and the disabled-mode response."""
+        started = time.monotonic()
+        name = action["action"]
+        store = getattr(self, "_ticket_store", None)
+        state = copy.deepcopy(req.case_state or {})
+        from harness.context import harness_mode
+        enabled = (req.harness_mode or harness_mode()) == "enforce"
+        if not enabled:
+            outcome = {"success": False, "error": "本地工单功能当前未开启，请启用 enforce 模式后再试；本次未创建或查询工单。"}
+        elif name == "create_ticket":
+            outcome = {"success": False, "error": "建单需由 Agent 调用 create_ticket 工具"}
+        else:
+            outcome = await get_ticket(req, store)
+        success = outcome.get("success") is True
+        ticket = outcome.get("ticket") or {}
+        agent_type = AgentType.GENERAL
+        if not success:
+            content = outcome.get("error") or "本地工单操作未完成，请稍后重试。"
+        elif outcome.get("found"):
+            content = (f"工单：{ticket['ticket_id']}\n状态：{ticket['status']}（待人工处理）"
+                       f"\n创建时间：{ticket['created_at']}\n问题或申请：{ticket['summary']}")
+        else:
+            content = "当前用户与会话范围内未找到该工单，请核对工单编号。"
+        trace = {
+            "agent_type": agent_type.value, "tool_name": name,
+            "input": {"case_id": state.get("case_id")} if name == "create_ticket" else {"ticket_id": action["ticket_id"] or (state.get("ticket_receipt") or {}).get("ticket_id", "")},
+            "success": True, "result_success": success,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "error": outcome.get("error", ""),
+        }
+        if success and ticket:
+            trace["ticket_id"] = ticket["ticket_id"]
+            trace["ticket_status"] = ticket["status"]
+            if name == "create_ticket":
+                trace["created"] = outcome.get("created") is True
+        result = OrchestratorResult(
+            request_id=req.request_id, response=content, agent_type=agent_type, intent=req.intent,
+            escalated=name == "create_ticket" and success,
+            latency_ms=(time.monotonic() - started) * 1000,
+            agent_types=[agent_type], primary_agent=agent_type,
+            tools_used=[name] if enabled else [], tool_traces=[trace] if enabled else [],
+            harness_events=[{"event": "ticket_action", "action": name, "success": success}],
+            routing_reason="明确工单指令，执行后端确定性动作", routing_confidence=1.0,
+            case_state=state, validation={"status": "deterministic_action", "extra_calls": 0},
+            execution_success=success,
         )
         self._record_tool_trace(result)
         return result
@@ -912,11 +1097,24 @@ class AgentOrchestrator:
         """
         t0 = time.monotonic()
         agent_types = decision.agent_types
-        tasks = [self._execute(req, at) for at in agent_types]
+        tasks = [self._execute(replace(req, ticket_tools_allowed=at == decision.primary_agent), at)
+                 for at in agent_types]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_responses = [r for r in responses if isinstance(r, AgentResponse)]
-        combined = await self._composer.compose(req, valid_responses)
+        from harness.context import harness_mode
+        mode = req.harness_mode or harness_mode()
+        merged_state = {}
+        merge_events = []
+        composer_req = req
+        if mode == "enforce":
+            merged_state = self._merge_case_state(
+                req, [update for response in valid_responses for update in response.state_updates],
+                [trace for response in valid_responses for trace in response.tool_traces],
+                merge_events,
+            )
+            composer_req = replace(req, case_state=merged_state)
+        combined = await self._composer.compose(composer_req, valid_responses)
         escalated = any(isinstance(r, AgentResponse) and r.escalate for r in responses)
         tools_used = list(dict.fromkeys(
             tool_name
@@ -943,9 +1141,129 @@ class AgentOrchestrator:
             supporting_agents=decision.supporting_agents,
             tools_used=tools_used,
             tool_traces=tool_traces,
+            harness_events=[event for response in valid_responses for event in response.harness_events] + merge_events,
+            state_updates=[update for response in valid_responses for update in response.state_updates],
+            case_state=merged_state,
+            execution_success=any(response.success and response.content.strip() for response in valid_responses),
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
+        return await self._finalize_result(req, result)
+
+    @staticmethod
+    def _merge_case_state(req, updates, traces, events):
+        from harness.state import apply_progress, apply_asset_lookup, new_case
+        from harness.runtime import evidence_ids
+        state = copy.deepcopy(req.case_state) if req.case_state else new_case(req.user_id, req.conv_id)
+        topic_reset = False
+        for update in updates:
+            candidate = dict(update)
+            if candidate.get("new_case") and topic_reset:
+                candidate.pop("new_case")
+            try:
+                state = apply_progress(state, candidate, req.message, req.request_id,
+                                       evidence_refs=evidence_ids(traces))
+                topic_reset = topic_reset or bool(candidate.get("new_case"))
+            except ValueError as ex:
+                events.append({"event": "state_update_rejected", "reason": str(ex)})
+        for trace in traces:
+            state = apply_asset_lookup(state, trace, req.request_id)
+        if req.intent == IntentCategory.PERMISSION_REQUEST:
+            state["request_kind"] = "access_request"
+        for trace in traces:
+            ticket_state = trace.get("ticket_state") or {}
+            # A replayed new_case gets a new UUID; retain the actual tool's case ID.
+            if (ticket_state.get("case_id") and trace.get("success") and trace.get("result_success")
+                    and trace.get("tool_name") in {"prepare_ticket", "create_ticket"}
+                    and any(update.get("new_case") for update in updates)):
+                state["case_id"] = ticket_state["case_id"]
+            if (trace.get("tool_name") in {"prepare_ticket", "create_ticket"}
+                    and trace.get("success") and trace.get("result_success")
+                    and ticket_state.get("case_id") == state.get("case_id")):
+                for key in ("ticket_confirmation", "ticket_receipt"):
+                    state[key] = copy.deepcopy(ticket_state.get(key) or {})
+        pending = state.get("ticket_confirmation") or {}
+        if pending and pending.get("fingerprint") != ticket_fingerprint(state):
+            state["ticket_confirmation"] = {}
+        return state
+
+    async def _finalize_result(self, req: Request, result: OrchestratorResult) -> OrchestratorResult:
+        """One delivery boundary for single, composed and fallback answers."""
+        finalize_started = time.monotonic()
+        from harness.context import harness_mode
+        from harness.runtime import evidence_ids
+        from harness.state import apply_progress, new_case
+        from harness.validation import ValidationResult, finalize_answer
+
+        mode = req.harness_mode or harness_mode()
+        if mode == "enforce":
+            if not result.case_state:
+                result.case_state = self._merge_case_state(req, result.state_updates,
+                                                          result.tool_traces, result.harness_events)
+        else:
+            result.case_state = dict(req.case_state or {})
+        if mode == "enforce" and not result.execution_success:
+            checked = ValidationResult(
+                content=result.response, status="runtime_failed", escalated=True,
+                issues=["Agent 执行失败，未生成可核验的最终回答"],
+                events=[{"event": "runtime_failure_handoff", "reason": "all_agent_attempts_failed"}],
+            )
+        else:
+            checked = await finalize_answer(
+                req.message, result.response, result.tool_traces,
+                self._composer._client, self._composer._model, mode,
+                case_state=result.case_state,
+            )
+        result.response = checked.content
+        result.validation = {"status": checked.status, "issues": checked.issues,
+                             "extra_calls": checked.extra_calls, "repair_count": checked.repair_count}
+        result.harness_events.extend(checked.events)
+        result.escalated = result.escalated or checked.escalated
+        if mode == "enforce" and checked.status in {"needs_handoff", "runtime_failed"}:
+            handoff = self._best_agent(AgentType.ESCALATION)
+            if handoff is not None:
+                handoff_req = replace(req, case_state=result.case_state)
+                handoff_result = await handoff.handle(handoff_req)
+                result.response = handoff_result.content
+                result.agent_type = AgentType.ESCALATION
+                if AgentType.ESCALATION not in result.agent_types:
+                    result.agent_types.append(AgentType.ESCALATION)
+                result.harness_events.append({"event": "validation_handoff"})
+        explicit_handoff = (
+            req.intent in {IntentCategory.HUMAN_HANDOFF, IntentCategory.ESCALATION}
+            or result.agent_type == AgentType.ESCALATION
+            or result.primary_agent == AgentType.ESCALATION
+            or checked.status in {"needs_handoff", "runtime_failed"}
+        )
+        if mode == "enforce" and explicit_handoff and result.case_state:
+            result.case_state = copy.deepcopy(result.case_state)
+            report = EscalationAgent.latest_user_report(replace(req, case_state=result.case_state))
+            if report:
+                result.case_state["latest_user_report"] = report
+            result.case_state["status"] = "handoff_ready"
+        if mode == "enforce":
+            receipt = result.case_state.get("ticket_receipt") or {}
+            ticket_written = any(trace.get("tool_name") == "create_ticket" and trace.get("result_success")
+                                 and trace.get("ticket_id") for trace in result.tool_traces)
+            if ticket_written and receipt.get("source") == "nexo_local":
+                receipt_text = f"工单 {receipt['ticket_id']} 已登记，当前待人工处理。可发送‘查询当前工单’查看记录状态。"
+                if not result.execution_success or checked.status in {"needs_handoff", "runtime_failed"}:
+                    result.response = receipt_text
+                    result.harness_events.append({"event": "ticket_receipt_recovered"})
+                elif receipt["ticket_id"] not in result.response:
+                    result.response += "\n\n" + receipt_text
+                result.case_state["ticket_confirmation"] = {}
+            pending = result.case_state.get("ticket_confirmation") or {}
+            if pending and not pending.get("delivered"):
+                if (result.execution_success and not explicit_handoff
+                        and pending.get("fingerprint") == ticket_fingerprint(result.case_state)):
+                    question = "需要我按以上信息登记工单吗？"
+                    if pending["summary"] not in result.response or question not in result.response:
+                        result.response += "\n\n待登记信息：" + pending["summary"] + "\n" + question
+                    pending["delivered"] = True
+                else:
+                    result.case_state["ticket_confirmation"] = {}
+        result.latency_ms += (time.monotonic() - finalize_started) * 1000
         self._record_tool_trace(result)
         return result
 
@@ -993,7 +1311,7 @@ class AgentOrchestrator:
         scores = self._domain_scores(req)
         degraded_agents = {
             agent_type
-            for agent_type in (AgentType.TECHNICAL, AgentType.ACCESS)
+            for agent_type in (AgentType.TECHNICAL, AgentType.ACCESS, AgentType.NETWORK, AgentType.DEVICE)
             if scores.get(agent_type, 0.0) > 0 and self._monitor_degraded(agent_type)
         }
         available_scores = {
@@ -1039,6 +1357,23 @@ class AgentOrchestrator:
             confidence=round(min(primary_score, 1.0), 3),
         )
 
+    @staticmethod
+    def _technical_keywords(req: Request, include_verification: bool = False) -> List[str]:
+        """明确网络/设备故障时，通用报错和连接词不再重复触发技术协作。"""
+        msg = req.message.lower()
+        specialised = req.intent in (
+            IntentCategory.NETWORK, IntentCategory.NETWORK_ISSUE,
+            IntentCategory.DEVICE, IntentCategory.DEVICE_FAILURE,
+        ) or bool(match_domain_keywords(msg, NETWORK_ISSUE_KEYWORDS + DEVICE_FAILURE_KEYWORDS))
+        if specialised:
+            keywords = ["崩溃", "闪退", "crash", "应用报错", "页面报错", "接口报错", "软件报错",
+                        "无法登录", "登录失败", "401", "验证码"]
+        else:
+            keywords = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "连不上", "连接失败"]
+        if include_verification and not specialised:
+            keywords.append("验证码")
+        return keywords + match_domain_keywords(msg, SOFTWARE_INSTALL_KEYWORDS)
+
     def _domain_scores(self, req: Request) -> Dict[AgentType, float]:
         """按意图、关键词和实体为各领域 Agent 打分。"""
         msg = req.message.lower()
@@ -1046,6 +1381,8 @@ class AgentOrchestrator:
             AgentType.GENERAL: 0.1,
             AgentType.TECHNICAL: 0.0,
             AgentType.ACCESS: 0.0,
+            AgentType.NETWORK: 0.0,
+            AgentType.DEVICE: 0.0,
         }
 
         if req.intent in (
@@ -1062,6 +1399,7 @@ class AgentOrchestrator:
             IntentCategory.TECHNICAL,
             IntentCategory.TECHNICAL_LOGIN,
             IntentCategory.TECHNICAL_CRASH,
+            IntentCategory.SOFTWARE_INSTALL,
         ):
             scores[AgentType.TECHNICAL] += 0.75
 
@@ -1072,7 +1410,7 @@ class AgentOrchestrator:
         ):
             scores[AgentType.ACCESS] += 0.75
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "验证码", "连不上", "连接失败"]
+        technical_kws = self._technical_keywords(req, include_verification=True)
         access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "permission", "只读权限"]
         general_kws = ["安装", "办公软件", "打印机", "操作手册", "咨询", "帮助"]
 
@@ -1083,6 +1421,15 @@ class AgentOrchestrator:
         scores[AgentType.TECHNICAL] += min(0.45, technical_hits * 0.18)
         scores[AgentType.ACCESS] += min(0.45, access_hits * 0.18)
         scores[AgentType.GENERAL] += min(0.35, general_hits * 0.12)
+
+        if req.intent in (IntentCategory.NETWORK, IntentCategory.NETWORK_ISSUE):
+            scores[AgentType.NETWORK] += 0.75
+        if req.intent in (IntentCategory.DEVICE, IntentCategory.DEVICE_FAILURE):
+            scores[AgentType.DEVICE] += 0.75
+        network_hits = len(match_domain_keywords(msg, NETWORK_ISSUE_KEYWORDS))
+        device_hits = len(match_domain_keywords(msg, DEVICE_FAILURE_KEYWORDS))
+        scores[AgentType.NETWORK] += min(0.45, network_hits * 0.18)
+        scores[AgentType.DEVICE] += min(0.45, device_hits * 0.18)
 
         entities = req.entities or {}
         if entities.get("error_code"):
@@ -1122,13 +1469,14 @@ class AgentOrchestrator:
         msg = req.message.lower()
         targets: List[AgentType] = []
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "连不上", "连接失败"]
+        technical_kws = self._technical_keywords(req)
         access_kws = ["申请权限", "项目权限", "访问权限", "权限申请", "开通", "permission", "只读权限"]
 
         if req.intent in (
             IntentCategory.TECHNICAL,
             IntentCategory.TECHNICAL_LOGIN,
             IntentCategory.TECHNICAL_CRASH,
+            IntentCategory.SOFTWARE_INSTALL,
         ) or any(kw in msg for kw in technical_kws):
             targets.append(AgentType.TECHNICAL)
         if req.intent in (
@@ -1138,19 +1486,35 @@ class AgentOrchestrator:
         ) or any(kw in msg for kw in access_kws):
             targets.append(AgentType.ACCESS)
 
+        if req.intent in (IntentCategory.NETWORK, IntentCategory.NETWORK_ISSUE) or match_domain_keywords(
+            msg, NETWORK_ISSUE_KEYWORDS
+        ):
+            targets.append(AgentType.NETWORK)
+        if req.intent in (IntentCategory.DEVICE, IntentCategory.DEVICE_FAILURE) or match_domain_keywords(
+            msg, DEVICE_FAILURE_KEYWORDS
+        ):
+            targets.append(AgentType.DEVICE)
+
         # 保持顺序去重，并只返回当前有实例的 Agent 类型。
         deduped = list(dict.fromkeys(targets))
         return [agent_type for agent_type in deduped if self._pool.get(agent_type)]
 
-    @staticmethod
-    def _needs_clarification(req: Request) -> bool:
-        """低置信度且无明确意图时，先追问，避免误路由。"""
+    def _needs_clarification(self, req: Request) -> bool:
+        """低置信度且没有已有 IT 线索时，先追问，避免误路由。"""
         if req.intent != IntentCategory.OTHER:
             return False
         text = (req.message or "").strip()
         if len(text) <= 2:
             return False
-        return req.intent_confidence < 0.5
+        if req.intent_confidence < 0.5:
+            # 已知目标系统或领域线索时，继续原路由，不直接返回固定反问。
+            if (req.entities or {}).get("target_system"):
+                return False
+            for agent_type, score in self._domain_scores(req).items():
+                if agent_type != AgentType.GENERAL and score > 0:
+                    return False
+            return True
+        return False
 
     def _best_agent(self, agent_type: AgentType) -> Optional[BaseAgent]:
         """
@@ -1194,12 +1558,41 @@ class AgentOrchestrator:
 
         response = await agent.handle(req)
 
+        if not response.success and any(trace.get("write_attempted") for trace in response.tool_traces):
+            response.harness_events.append({"event": "agent_fallback_blocked", "reason": "ticket_write_attempted"})
+            return response
+
         # 专属 Agent 失败时降级到 GeneralAgent
         if not response.success and agent_type not in (AgentType.GENERAL, AgentType.ESCALATION):
             logger.warning(f"{agent_type.value} 失败，降级到 GeneralAgent")
             fallback = self._best_agent(AgentType.GENERAL)
             if fallback:
-                response = await fallback.handle(req)
+                previous = response
+                from harness.context import harness_mode
+                from harness.runtime import evidence_ids
+                from harness.state import apply_progress, new_case
+                mode = req.harness_mode or harness_mode()
+                fallback_req = req
+                if mode == "enforce":
+                    state = self._merge_case_state(req, previous.state_updates,
+                                                   previous.tool_traces, previous.harness_events)
+                    evidence = [item for call in previous.tool_traces
+                                if call.get("tool_name") == "search_knowledge_base"
+                                and call.get("success") and call.get("result_success") is not False
+                                for item in (call.get("retrieval") or {}).get("evidence", [])]
+                    context = req.context
+                    if evidence:
+                        context += "\n\n[本次处理已经返回的知识库资料]\n" + json.dumps(evidence, ensure_ascii=False)
+                    fallback_req = replace(req, case_state=state, context=context)
+                response = await fallback.handle(fallback_req)
+                if mode == "enforce":
+                    response.tools_used = list(dict.fromkeys(previous.tools_used + response.tools_used))
+                    response.tool_traces = previous.tool_traces + response.tool_traces
+                    response.state_updates = previous.state_updates + response.state_updates
+                if mode != "off":
+                    response.harness_events = previous.harness_events + [
+                        {"event": "agent_fallback", "from": agent_type.value, "to": "general"}
+                    ] + response.harness_events
 
         return response
 

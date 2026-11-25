@@ -1,0 +1,26 @@
+[
+  {
+    "asset_id": "NB-001",
+    "device_type": "笔记本",
+    "device_model": "DemoBook 14",
+    "operating_system": "Windows 11",
+    "configuration": "16GB 内存，512GB SSD",
+    "warranty_until": "2028-06-30"
+  },
+  {
+    "asset_id": "PC-001",
+    "device_type": "台式机",
+    "device_model": "DemoStation S1",
+    "operating_system": "Windows 11",
+    "configuration": "32GB 内存，1TB SSD",
+    "warranty_until": "2027-12-31"
+  },
+  {
+    "asset_id": "PR-001",
+    "device_type": "打印机",
+    "device_model": "DemoPrint P1",
+    "operating_system": "不适用（打印机固件）",
+    "configuration": "黑白激光，自动双面，USB 和有线网络",
+    "warranty_until": "2027-09-30"
+  }
+]

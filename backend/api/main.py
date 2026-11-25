@@ -49,6 +49,7 @@ _tool_manager = None
 _monitor      = None
 _evaluator    = None
 _skill_manager = None
+_case_store = None
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -66,7 +67,7 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
+    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager, _case_store
 
     print(BANNER, flush=True)
 
@@ -74,6 +75,8 @@ async def lifespan(app: FastAPI):
     from core.intent_recognizer import IntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
     from mcp.knowledge_base import KnowledgeBase
+    from mcp.elasticsearch_store import ElasticsearchStore
+    from mcp.reranker import HTTPReranker
     from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
     from monitor.performance_monitor import PerformanceMonitor
@@ -97,12 +100,23 @@ async def lifespan(app: FastAPI):
     )
     _skill_manager.load()
 
+    # 本地演示工单仅在 enforce 模式启用，独立于 Redis 会话状态持久化。
+    from core.ticket_store import TicketStore
+    from harness.context import harness_mode
+    ticket_store = None
+    if harness_mode() == "enforce":
+        ticket_path = os.getenv(
+            "NEXO_TICKET_DB_PATH", str(pathlib.Path(_ROOT).parent / "data" / "tickets" / "tickets.sqlite3"),
+        )
+        ticket_store = await asyncio.to_thread(TicketStore, ticket_path)
+
     # Agent 编排器
     _orchestrator = AgentOrchestrator(
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         skill_manager=_skill_manager,
+        ticket_store=ticket_store,
     )
 
     # 记忆管理器（Redis 工作记忆 + ChromaDB 情景记忆/用户画像）
@@ -116,17 +130,36 @@ async def lifespan(app: FastAPI):
         model=cfg["model"],
     )
 
+    # 独立任务快照复用 Redis 连接，不参与历史摘要压缩。
+    from harness.state import CaseStore
+    _case_store = CaseStore(_memory._redis)
+
     # MCP 工具管理器 + RAG 知识库（基于 ChromaDB 的真实检索）
     _tool_manager = MCPToolManager(
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
         model=cfg["model"],
     )
+    keyword_store = ElasticsearchStore(
+        url=os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200"),
+        index_name=os.getenv("ELASTICSEARCH_INDEX", "nexo_knowledge"),
+    )
+    reranker = HTTPReranker(
+        url=os.getenv("RERANK_URL", ""),
+        api_key=os.getenv("RERANK_API_KEY") or None,
+        model=os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
+        timeout_s=float(os.getenv("RERANK_TIMEOUT_SECONDS", "8")),
+    )
     kb = KnowledgeBase(
+        keyword_store=keyword_store,
         chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
         chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
         chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
     )
+    try:
+        await kb.initialize_keyword_index()
+    except Exception as ex:
+        logger.warning("关键词索引初始化未完成，将保留向量通道: %s", type(ex).__name__)
     logger.info(f"知识库已加载: {await kb.doc_count_async()} 个文档片段")
 
     def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
@@ -155,6 +188,24 @@ async def lifespan(app: FastAPI):
         supports_rerank=True,
         fallback=knowledge_fallback,
     ))
+    _tool_manager.register(Tool(
+        name="keyword_search",
+        description="搜索知识库（Elasticsearch BM25）",
+        handler=kb.keyword_search_handler,
+        schema={"type": "object", "properties": {
+            "query": {"type": "string"}, "top_k": {"type": "integer"}},
+            "required": ["query"]},
+        cache_ttl=300.0,
+    ))
+    _tool_manager.set_rag_components(
+        keyword_tool_name="keyword_search", reranker=reranker,
+        neighbor_loader=kb.get_neighbors_async,
+        candidate_k=int(os.getenv("RAG_CANDIDATE_K", "20")),
+        rrf_k=int(os.getenv("RAG_RRF_K", "60")),
+        neighbor_window=int(os.getenv("RAG_NEIGHBOR_WINDOW", "1")),
+        max_expansion_seeds=int(os.getenv("RAG_EXPANSION_SEEDS", "3")),
+        evidence_max_chars=int(os.getenv("RAG_EVIDENCE_MAX_CHARS", "8000")),
+    )
     if _orchestrator is not None:
         _orchestrator.set_shared_tools(build_shared_rag_tools(_tool_manager))
 
@@ -177,12 +228,15 @@ async def lifespan(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         baseline_path=os.getenv("EVAL_BASELINE_PATH", "/app/data/eval/baseline.json"),
+        chat_runner=_evaluation_chat,
     )
 
     logger.info("Nexo 已就绪")
     yield
 
     await _monitor.stop()
+    await keyword_store.close()
+    await reranker.close()
     if _memory is not None:
         await _memory.close()
     logger.info("Nexo 已关闭")
@@ -230,6 +284,8 @@ class ChatResponse(BaseModel):
     entities: Dict[str, List[str]] = Field(default_factory=dict)
     intent_confidence: float = 0.0
     intent_source_scores: Dict[str, float] = Field(default_factory=dict)
+    case_state: Dict[str, Any] = Field(default_factory=dict)
+    harness_events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ToolTraceResponse(BaseModel):
@@ -280,6 +336,8 @@ async def chat(req: ChatRequest):
 
     from agents.agent_orchestrator import Request as OrcReq
     from memory.conversation_memory import MsgRole
+    from harness.context import harness_mode, case_history
+    from harness.state import CaseConflictError, prepare_case
 
     conv_id = req.conv_id or str(uuid.uuid4())
 
@@ -295,6 +353,16 @@ async def chat(req: ChatRequest):
     intent_result = await _orchestrator.recognize_intent(req.message, history=history)
     full_context = mem_ctx.to_prompt_text()
 
+    # 路由输入保持原样，只有 enforce 模式读取独立任务状态。
+    mode = harness_mode()
+    case = {}
+    if mode == "enforce":
+        if _case_store is None:
+            raise HTTPException(503, "任务状态存储未就绪")
+        case = prepare_case(await _case_store.load(req.user_id, conv_id), req.message)
+        if case.get("isolate_history"):
+            full_context, history = case_history(mem_ctx, case)
+
     orch_req = OrcReq(
         message=req.message,
         user_id=req.user_id,
@@ -306,14 +374,30 @@ async def chat(req: ChatRequest):
         intent_group=intent_result.intent_group,
         urgency=intent_result.urgency,
         intent_confidence=intent_result.confidence,
+        case_state=case,
+        harness_mode=mode,
     )
 
     # 3. 执行
     result = await _orchestrator.run(orch_req)
 
+    saved_case = {}
+    if mode == "enforce":
+        try:
+            saved_case = await _case_store.save(
+                result.case_state or case, expected_version=case.get("version", 0),
+            )
+        except CaseConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     # 4. 写入记忆
-    await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
-    await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
+    if mode == "enforce":
+        metadata = {"case_id": saved_case["case_id"]}
+        await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message, metadata=metadata)
+        await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response, metadata=metadata)
+    else:
+        await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
+        await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
 
     # 5. 异步更新用户画像（不阻塞响应）
     asyncio.create_task(_memory.update_profile(req.user_id, conv_id))
@@ -337,12 +421,15 @@ async def chat(req: ChatRequest):
         entities=intent_result.entities,
         intent_confidence=round(intent_result.confidence, 4),
         intent_source_scores=intent_result.source_scores,
+        case_state={key: value for key, value in saved_case.items()
+                    if key not in ("user_id", "conv_id")},
+        harness_events=getattr(result, "harness_events", []),
     )
 
 
 @app.get("/monitor")
 async def monitor_summary():
-    """实时监控摘要：Agent 成功率、工具统计、告警、优化建议。"""
+    """实时监控摘要：Agent 执行统计、RAG 检索工具统计、告警、优化建议。"""
     if _monitor is None:
         raise HTTPException(503, "服务未就绪")
     return _monitor.summary()
@@ -384,13 +471,18 @@ async def search(query: str, top_k: int = 5):
     if _tool_manager is None:
         raise HTTPException(503, "服务未就绪")
     result = await _tool_manager.search_with_rewrite("knowledge_search", query, top_k=top_k)
-    return {"query": query, "results": result.data, "reranked": result.reranked}
+    return {"query": query, "success": result.success, "error": result.error,
+            "results": result.data, "reranked": result.reranked,
+            "retrieval": result.retrieval}
 
 
 class DocInput(BaseModel):
     """单篇文档输入。"""
     title:   str
     content: str
+    doc_id: Optional[str] = None
+    source: str = ""
+    section: str = ""
 
 
 class BatchDocInput(BaseModel):
@@ -440,7 +532,11 @@ async def add_knowledge(body: BatchDocInput):
     if tool is None:
         raise HTTPException(503, "知识库未初始化")
     kb = tool.handler.__self__
-    count = await kb.add_documents_async([{"title": d.title, "content": d.content} for d in body.documents])
+    try:
+        count = await kb.add_documents_async([d.model_dump(exclude_none=True) for d in body.documents])
+    finally:
+        # 失败也可能已有部分文档完成发布，不能继续使用旧检索缓存。
+        _tool_manager.invalidate_rag_cache()
     total = await kb.doc_count_async()
     return {"message": f"成功导入 {count} 个文档片段", "added_chunks": count, "total_chunks": total}
 
@@ -481,7 +577,11 @@ async def upload_knowledge(file: UploadFile = File(...)):
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
         docs = [{"title": title, "content": text}]
 
-    count = await kb.add_documents_async(docs)
+    try:
+        count = await kb.add_documents_async(docs)
+    finally:
+        # 失败也可能已有部分文档完成发布，不能继续使用旧检索缓存。
+        _tool_manager.invalidate_rag_cache()
     total = await kb.doc_count_async()
     return {
         "message": f"文件 {filename} 导入成功",
@@ -498,6 +598,12 @@ async def knowledge_stats():
         raise HTTPException(503, "知识库未初始化")
     kb = tool.handler.__self__
     return {"total_chunks": await kb.doc_count_async()}
+
+
+async def _evaluation_chat(message: str, user_id: str, conv_id: str):
+    """评测使用独立身份，复用正常聊天的记忆、状态和实体流程。"""
+    response = await chat(ChatRequest(message=message, user_id=user_id, conv_id=conv_id))
+    return response.model_dump(mode="json")
 
 
 @app.post("/eval/run")
@@ -532,6 +638,7 @@ async def run_eval(body: Optional[EvalRunInput] = None):
         dialog_cases=dialog_cases,
     )
     return {
+        "metadata":        report.metadata,
         "pass_rate":       report.pass_rate,
         "total":           report.total,
         "passed":          report.passed,
